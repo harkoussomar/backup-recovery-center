@@ -1,0 +1,29 @@
+// Generated from this template by installer/install.sh.
+// The public project never hard-codes a personal username.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "__BRC_USER__")
+        return polkit.Result.NOT_HANDLED;
+
+    if (action.id !== "org.freedesktop.systemd1.manage-units")
+        return polkit.Result.NOT_HANDLED;
+
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var allowed = [
+        "backup-recovery-state.service",
+        "backup-recovery-backup.service",
+        "backup-recovery-timeshift.service",
+        "backup-recovery-restic-check.service",
+        "backup-recovery-restore-test.service",
+        "backup-recovery-smart-short.service",
+        "backup-recovery-smart-long.service",
+        "backup-recovery-mount.service",
+        "backup-recovery-eject.service",
+        "backup-recovery-refresh-manifests.service"
+    ];
+
+    if (verb === "start" && allowed.indexOf(unit) !== -1)
+        return polkit.Result.YES;
+
+    return polkit.Result.NOT_HANDLED;
+});

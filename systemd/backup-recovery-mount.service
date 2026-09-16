@@ -1,0 +1,10 @@
+[Unit]
+Description=Mount the backup HDD
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/backup-recovery/root_actions.py mount
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

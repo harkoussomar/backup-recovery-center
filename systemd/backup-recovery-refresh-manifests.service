@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Arch recovery manifests
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/backup-recovery/root_actions.py refresh-manifests
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

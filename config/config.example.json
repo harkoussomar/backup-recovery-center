@@ -1,0 +1,16 @@
+{
+  "user": "YOUR_USER",
+  "backup_uuid": "CHANGE_ME",
+  "mountpoint": "/mnt/backup",
+  "restic_repo": "/mnt/backup/restic",
+  "restic_password_file": "/etc/restic/password",
+  "restic_cache_dir": "/var/cache/restic",
+  "backup_service": "restic-system-backup.service",
+  "backup_timer": "restic-system-backup.timer",
+  "maintenance_service": "restic-maintenance.service",
+  "maintenance_timer": "restic-maintenance.timer",
+  "overdue_hours": 48,
+  "second_copy_configured": false,
+  "recovery_media_verified": false,
+  "restore_test_path": "/etc/hostname"
+}

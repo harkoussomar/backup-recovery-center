@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify a real file restore from the Restic repository
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/backup-recovery/root_actions.py restore-test
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

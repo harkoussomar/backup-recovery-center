@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a Timeshift restore point
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/backup-recovery/root_actions.py timeshift
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

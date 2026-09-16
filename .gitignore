@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Test/runtime output
+*.log
+*.tmp
+.cache/
+state.json
+evidence.json
+
+# Secret/private material
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+config/config.json
+restic-password*
+password*
+
+# Backup/recovery data must never enter Git
+restic/
+timeshift/
+recovery/
+arch-state/
+*.iso
+
+# Editor
+.vscode/
+.idea/
+
+# Release artifacts
+CHECKSUMS.sha256
+dist/
+*.zip
+*.tar.gz

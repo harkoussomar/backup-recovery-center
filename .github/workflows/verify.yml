@@ -1,0 +1,19 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  public-tree:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install CI dependencies
+        run: pacman -Syu --noconfirm git python
+      - uses: actions/checkout@v4
+      - name: Verify public tree
+        run: ./scripts/verify-public-tree.sh

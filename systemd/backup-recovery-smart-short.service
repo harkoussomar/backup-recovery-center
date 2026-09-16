@@ -1,0 +1,10 @@
+[Unit]
+Description=Start a short SMART self-test
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/backup-recovery/root_actions.py smart-short
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
