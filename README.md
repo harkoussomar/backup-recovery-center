@@ -30,33 +30,32 @@ The dashboard separates:
 
 ## Screenshots
 
-### Backups
-
-Encrypted Restic snapshots, backup scheduling, repository verification, and
-storage state.
-
-![Backup & Recovery Center backups](screenshots/backups.png)
-
-### Restore points
-
-Timeshift RSYNC rollback points and retention policy without exposing a
-one-click destructive system restore.
-
-![Backup & Recovery Center restore points](screenshots/restore.png)
-
-### Disk health
-
-Current SMART state, temperature, lifetime power-on hours, sector counters,
-historical ATA errors, and self-test status.
-
-![Backup & Recovery Center disk health](screenshots/disk-health.png)
-
-### Recovery readiness
-
-A concrete disaster-recovery checklist covering Restic, restore testing,
-Timeshift, recovery documentation, system manifests, and bootable media.
-
-![Backup & Recovery Center recovery readiness](screenshots/recovery.png)
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Backups</strong><br>
+      <sub>Restic snapshots, scheduling, repository verification, and storage state.</sub><br><br>
+      <img src="screenshots/backups.png" alt="Backup & Recovery Center backups" width="100%">
+    </td>
+    <td width="50%">
+      <strong>Restore points</strong><br>
+      <sub>Timeshift RSYNC rollback points and retention policy.</sub><br><br>
+      <img src="screenshots/restore.png" alt="Backup & Recovery Center restore points" width="100%">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Disk health</strong><br>
+      <sub>SMART condition, sector counters, history, and self-test state.</sub><br><br>
+      <img src="screenshots/disk-health.png" alt="Backup & Recovery Center disk health" width="100%">
+    </td>
+    <td width="50%">
+      <strong>Recovery readiness</strong><br>
+      <sub>Disaster-recovery readiness, manifests, documentation, and resilience.</sub><br><br>
+      <img src="screenshots/recovery.png" alt="Backup & Recovery Center recovery readiness" width="100%">
+    </td>
+  </tr>
+</table>
 
 ## Validation status
 
@@ -153,6 +152,100 @@ Backup & Recovery Center currently understands these recovery layers:
 ```
 
 The GUI does not replace those tools. It coordinates and explains their state.
+
+## Security model
+
+The desktop UI remains unprivileged. Root-required operations are exposed only
+through fixed systemd units and a narrow Polkit allow-list; the GUI cannot
+construct arbitrary privileged commands.
+
+Storage-sensitive operations verify the configured filesystem identity before
+reading or mutating backup state.
+
+## State model
+
+The UI deliberately distinguishes states that are often incorrectly collapsed
+together:
+
+```text
+disk disconnected
+connected but unmounted
+correct filesystem mounted
+wrong filesystem mounted
+filesystem identity unknown
+repository accessible / unavailable
+live evidence / cached evidence
+verified success / unknown result / actual failure
+```
+
+A disconnected removable backup disk is therefore a valid state. Cached
+snapshot information may remain visible as **last-known evidence**, but it is
+not presented as live repository state.
+
+See [docs/state-model.md](docs/state-model.md).
+
+## Restore verification
+
+A successful backup is not enough evidence that recovery works.
+
+Backup & Recovery Center restores a configured source file from Restic into
+temporary storage and compares it byte-for-byte with the source before recording
+verified evidence.
+
+The default source is `/etc/hostname` and can be overridden with
+`BRC_RESTORE_TEST_PATH`.
+
+## SMART and disk health
+
+Disk health separates current condition from historical evidence.
+
+The UI tracks current SMART status, temperature, power-on hours,
+reallocated/pending/uncorrectable sectors, CRC errors, historical ATA errors,
+and the latest SMART self-test state.
+
+Historical errors remain visible without automatically being treated as current
+media failure.
+
+## Recovery readiness
+
+Core recovery readiness currently tracks:
+
+- encrypted Restic repository;
+- actual restore verification;
+- Timeshift restore points;
+- recovery documentation;
+- Arch system manifests;
+- bootable recovery media.
+
+Recommended resilience improvements, such as a second independent backup copy,
+are shown separately from the core readiness score.
+
+## Testing
+
+Run the full safe verification suite with:
+
+```bash
+./scripts/verify-public-tree.sh
+```
+
+The suite covers source sanitization, Python compilation, shell syntax,
+filesystem-identity regressions, offline/connected/unmounted states, SMART
+self-test detection, shell integration, public package contracts, and the
+Bubblewrap installer-audit smoke test when Bubblewrap is available.
+
+GitHub Actions runs the portable portion of the same verification suite on every
+push and pull request.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [State model](docs/state-model.md)
+- [Operations](docs/operations.md)
+- [Compatibility](docs/compatibility.md)
+- [Public release checklist](docs/public-release-checklist.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ## Repository layout
 
