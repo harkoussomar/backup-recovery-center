@@ -109,7 +109,7 @@ case "$MODE" in
   *) usage >&2; exit 2 ;;
 esac
 
-for cmd in python3 systemctl grep install cp mkdir hyprctl qs findmnt lsblk mountpoint smartctl smartctl smartctl smartctl smartctl; do
+for cmd in python3 systemctl grep install cp mkdir hyprctl qs findmnt lsblk mountpoint smartctl; do
   have "$cmd" || die "required command missing: $cmd"
 done
 
