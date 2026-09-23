@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_VERSION="0.1.0-alpha.6"
+PACKAGE_VERSION="0.1.0-alpha.7"
 PURGE=0
 case "${1:-}" in
   "") ;;
@@ -37,7 +37,13 @@ GLOBAL="$II_ROOT/GlobalStates.qml"
 FAMILY="$II_ROOT/panelFamilies/IllogicalImpulseFamily.qml"
 MODULE="$II_ROOT/modules/ii/backupRecovery"
 HELPER="$II_ROOT/scripts/backup-recovery"
-KEYBINDS="${BRC_KEYBINDS:-$HOME/.config/hypr/custom/keybinds.conf}"
+if [[ -n "${BRC_KEYBINDS:-}" ]]; then
+  KEYBINDS="$BRC_KEYBINDS"
+elif [[ -f "$HOME/.config/hypr/hyprland.lua" ]]; then
+  KEYBINDS="$HOME/.config/hypr/custom/keybinds.lua"
+else
+  KEYBINDS="$HOME/.config/hypr/custom/keybinds.conf"
+fi
 
 SYSTEM_UNITS=(
   backup-recovery-state.service
@@ -77,7 +83,7 @@ python3 "$ROOT_DIR/installer/shell_edit.py" remove \
   --family "$FAMILY"
 
 if [[ -f "$KEYBINDS" ]]; then
-  sed -i '/# >>> backup-recovery-center >>>/,/# <<< backup-recovery-center <<</d' "$KEYBINDS"
+  sed -i '/backup-recovery-center >>>/,/backup-recovery-center <<</d' "$KEYBINDS"
   # Compatibility cleanup for early unmarked public/private prototypes.
   sed -i '/^[[:space:]]*bind[[:space:]]*=.*ipc call backupRecovery toggle[[:space:]]*$/d' "$KEYBINDS"
 fi

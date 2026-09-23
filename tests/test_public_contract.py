@@ -5,7 +5,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
-assert (ROOT / "VERSION").read_text().strip() == "0.1.0-alpha.6"
+assert (ROOT / "VERSION").read_text().strip() == "0.1.0-alpha.7"
 
 cfg = json.loads((ROOT / "config/config.example.json").read_text())
 assert cfg["user"] == "YOUR_USER"
@@ -32,7 +32,7 @@ assert "UI_CONTRACT = '2'" in collector
 assert 'ui_contract: "2"' in content
 assert "Appearance.radius." not in content
 assert "Appearance.rounding." in content
-assert "0.1.0-alpha.6" not in wrapper
+assert "0.1.0-alpha.7" not in wrapper
 
 # Unknown is not zero.
 assert "count': None" in collector or '"count": None' in collector

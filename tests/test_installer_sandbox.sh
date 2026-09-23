@@ -75,6 +75,10 @@ cat > "$FAKEBIN/findmnt" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
+cat > "$FAKEBIN/smartctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 chmod +x "$FAKEBIN"/*
 run_audit() {
   local extra_env=("$@")

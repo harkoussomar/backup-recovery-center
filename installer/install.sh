@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_VERSION="0.1.0-alpha.6"
+PACKAGE_VERSION="0.1.0-alpha.7"
 UI_PROTOCOL="2"
 SCHEMA_VERSION="2"
 MODE="${1:---install}"
@@ -19,7 +19,13 @@ USER_HOME="$HOME"
 USER_GROUP="$(id -gn)"
 II_ROOT="${II_ROOT:-$USER_HOME/.config/quickshell/ii}"
 KEY="${BRC_KEY:-U}"
-KEYBINDS="${BRC_KEYBINDS:-$USER_HOME/.config/hypr/custom/keybinds.conf}"
+if [[ -n "${BRC_KEYBINDS:-}" ]]; then
+  KEYBINDS="$BRC_KEYBINDS"
+elif [[ -f "$USER_HOME/.config/hypr/hyprland.lua" ]]; then
+  KEYBINDS="$USER_HOME/.config/hypr/custom/keybinds.lua"
+else
+  KEYBINDS="$USER_HOME/.config/hypr/custom/keybinds.conf"
+fi
 
 GLOBAL="$II_ROOT/GlobalStates.qml"
 FAMILY="$II_ROOT/panelFamilies/IllogicalImpulseFamily.qml"
@@ -103,7 +109,7 @@ case "$MODE" in
   *) usage >&2; exit 2 ;;
 esac
 
-for cmd in python3 systemctl grep install cp mkdir hyprctl qs findmnt lsblk mountpoint; do
+for cmd in python3 systemctl grep install cp mkdir hyprctl qs findmnt lsblk mountpoint smartctl smartctl smartctl smartctl smartctl; do
   have "$cmd" || die "required command missing: $cmd"
 done
 
@@ -278,6 +284,7 @@ conflicts=[
     if str(x.get("key","")).upper()==key
     and int(x.get("modmask",0) or 0)==64
     and "backupRecovery" not in str(x.get("arg",""))
+    and str(x.get("description","")) != "Backup & Recovery Center"
 ]
 if conflicts:
     raise SystemExit(f"ERROR: Super+{key} is already owned by another live binding")
@@ -327,12 +334,21 @@ python3 "$ROOT_DIR/installer/shell_edit.py" add \
 
 # Add keybind exactly once.
 if ! grep -Fq 'ipc call backupRecovery toggle' "$STAGE/keybinds.conf"; then
-  cat >> "$STAGE/keybinds.conf" <<EOF
+  if [[ "$KEYBINDS" == *.lua ]]; then
+    cat >> "$STAGE/keybinds.conf" <<EOF
+
+-- >>> backup-recovery-center >>>
+hl.bind("SUPER + $KEY", hl.dsp.exec_cmd("qs -c ii ipc call backupRecovery toggle"), { description = "Backup & Recovery Center" })
+-- <<< backup-recovery-center <<<
+EOF
+  else
+    cat >> "$STAGE/keybinds.conf" <<EOF
 
 # >>> backup-recovery-center >>>
 bind = SUPER, $KEY, exec, qs -c ii ipc call backupRecovery toggle
 # <<< backup-recovery-center <<<
 EOF
+  fi
 fi
 
 grep -Fq 'property bool backupRecoveryOpen:' "$STAGE/GlobalStates.qml" \
@@ -546,6 +562,13 @@ sudo systemctl enable --now backup-recovery-state.timer
 sudo systemctl start backup-recovery-state.service
 hyprctl reload >/dev/null
 
+# Quickshell may reload while live QML files are being replaced.
+# Restart the II shell once publishing is complete.
+qs -c ii kill >/dev/null 2>&1 || true
+sleep 0.5
+nohup qs -c ii >"$WORK/quickshell-restart.log" 2>&1 &
+sleep 2
+
 # State contract proof.
 sudo python3 - "$STATE_DIR/state.json" "$USER_NAME" "$UI_PROTOCOL" "$SCHEMA_VERSION" <<'PY'
 import json, os, pwd, stat, sys
@@ -564,7 +587,7 @@ sudo -u "$USER_NAME" test -r "$STATE_DIR/state.json"
 
 # Wrapper runtime proof: stdout return values are intentionally not used.
 WRAPPER_OK=0
-for _ in {1..30}; do
+for _ in {1..120}; do
   if qs -c ii ipc call backupRecoveryProtocol2 ping >/dev/null 2>&1; then
     WRAPPER_OK=1
     break
@@ -615,7 +638,10 @@ items=json.loads(subprocess.check_output(["hyprctl","binds","-j"],text=True))
 assert any(
     str(x.get("key","")).upper()==key
     and int(x.get("modmask",0) or 0)==64
-    and "backupRecovery" in str(x.get("arg",""))
+    and (
+        "backupRecovery" in str(x.get("arg",""))
+        or str(x.get("description","")) == "Backup & Recovery Center"
+    )
     for x in items
 )
 print(f"✓ live Super+{key} binding verified")

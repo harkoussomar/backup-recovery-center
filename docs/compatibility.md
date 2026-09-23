@@ -1,6 +1,6 @@
 # Compatibility Contract
 
-`v0.1.0-alpha.6` is deliberately narrow.
+`v0.1.0-alpha.7` is deliberately narrow.
 
 ## Supported architecture
 

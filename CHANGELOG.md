@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.7
+
+Clean-VM Illogical Impulse compatibility hardening.
+
+- Added support for the current Lua-based Hyprland `custom/keybinds.lua`.
+- Fixed live shortcut verification for Lua-created Hyprland bindings.
+- Restart the `ii` Quickshell instance after transactional shell publication.
+- Extended the IPC readiness window for slower reloads.
+- Require `smartctl` before installation because safe eject depends on it.
+- Validated install/reinstall, backup, repository check, restore test, Timeshift,
+  wrong-filesystem rejection, safe uninstall/purge, and transactional QML rollback.
+
 ## 0.1.0-alpha.6
 
 Clean persistent-mount validation.
