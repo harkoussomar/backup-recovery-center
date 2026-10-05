@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.8
+
+Runtime 1.6.0 reliability, recovery-proof, UX, and packaging release.
+
+- Freshness-aware protection truth; current failures override cached success.
+- Global backend-owned operation state with duplicate/conflict rejection and a
+  root storage lock across backup/recovery actions.
+- Post-backup Restic snapshot proof, repository identity/provenance, rotating
+  data-subset checks, and snapshot-bound restore verification.
+- Dated recovery evidence for credentials, boot media, and independent copies.
+- Systemd defense-in-depth hardening and tighter config/state permissions.
+- Global operation UI, modal focus/input safety, compact navigation, and instant
+  cached first paint with background expensive refresh.
+- Standard desktop notifications for meaningful operation lifecycle events.
+- Added deployment doctor, self-test, evidence, and recovery-drill tools.
+- Public installer deploys runtime contract 1.6.0, all diagnostic tools,
+  hardening drop-ins, integrity metadata, and validates the installed result.
+- CI requires Bubblewrap and keeps the installer audit network-unshared.
+
 ## 0.1.0-alpha.7
 
 Clean-VM Illogical Impulse compatibility hardening.

@@ -90,7 +90,7 @@ def main() -> int:
             f"version={install.get('version')} backend={install.get('backend_revision')} schema={install.get('state_schema')}")
         release_good = (
             str(install.get('phase') or '') == '4B'
-            and str(install.get('release_stage') or '') == 'local-closure'
+            and str(install.get('release_stage') or '') in ('local-closure', 'public-release')
             and bool(install.get('local_closure')) is True
         )
         add('local closure metadata', 'pass' if release_good else 'fail',

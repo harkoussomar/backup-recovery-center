@@ -2,6 +2,10 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 if ! command -v bwrap >/dev/null 2>&1; then
+  if [[ "${CI:-}" == "true" ]]; then
+    echo "ERROR: bubblewrap is required in CI" >&2
+    exit 1
+  fi
   echo "SKIP: bubblewrap is not installed"
   exit 0
 fi
@@ -83,7 +87,7 @@ chmod +x "$FAKEBIN"/*
 run_audit() {
   local extra_env=("$@")
   bwrap \
-    --die-with-parent --unshare-all --share-net \
+    --die-with-parent --unshare-all \
     --ro-bind / / \
     --proc /proc \
     --tmpfs /tmp \

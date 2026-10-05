@@ -9,12 +9,12 @@ actions.
 Backup & Recovery Center turns backup and recovery state into something that is
 easy to inspect, verify, and act on without hiding important uncertainty.
 
-> **Status:** `v0.1.0-alpha.6`
+> **Status:** `v0.1.0-alpha.8`
 >
-> This is an early portability and hardening build. The source, backend safety
-> tests, installer contract, and Bubblewrap sandbox audit pass, but a fresh
-> clean-Arch VM installation test is still pending before the first tagged
-> public prerelease.
+> This prerelease contains the validated runtime contract `1.6.0`, the
+> hardened public installer, backend safety/contract tests, and the isolated
+> Bubblewrap installer audit. A separate clean-Arch VM recovery drill remains
+> recommended before promoting beyond alpha.
 
 ## Overview
 

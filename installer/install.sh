@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_VERSION="0.1.0-alpha.7"
-UI_PROTOCOL="2"
+PACKAGE_VERSION="0.1.0-alpha.8"
+UI_PROTOCOL="1.6.0"
+BACKEND_REVISION="1.6.0-phase4-final"
 SCHEMA_VERSION="2"
 MODE="${1:---install}"
 
@@ -35,6 +36,7 @@ HELPER_DST="$II_ROOT/scripts/backup-recovery"
 CONFIG_DST="/etc/backup-recovery/config.json"
 INSTALL_META="/etc/backup-recovery/install.json"
 BACKEND_DST="/usr/local/lib/backup-recovery"
+TOOLS_DST="/usr/local/bin"
 POLKIT_DST="/etc/polkit-1/rules.d/49-backup-recovery.rules"
 STATE_DIR="/var/lib/backup-recovery"
 
@@ -60,6 +62,26 @@ SYSTEM_UNITS=(
   backup-recovery-mount.service
   backup-recovery-eject.service
   backup-recovery-refresh-manifests.service
+)
+
+HARDENED_SERVICES=(
+  backup-recovery-backup.service
+  backup-recovery-eject.service
+  backup-recovery-mount.service
+  backup-recovery-refresh-manifests.service
+  backup-recovery-restic-check.service
+  backup-recovery-restore-test.service
+  backup-recovery-smart-long.service
+  backup-recovery-smart-short.service
+  backup-recovery-state.service
+  backup-recovery-timeshift.service
+)
+
+TOOL_NAMES=(
+  backup-recovery-evidence
+  backup-recovery-doctor
+  backup-recovery-selftest
+  backup-recovery-recovery-drill
 )
 
 PUBLISHED=0
@@ -295,6 +317,10 @@ ok "Live Super+$KEY ownership is available"
 python3 -m py_compile \
   "$ROOT_DIR/src/backend/root_actions.py" \
   "$ROOT_DIR/src/backend/state_collector.py" \
+  "$ROOT_DIR/src/tools/backup-recovery-evidence" \
+  "$ROOT_DIR/src/tools/backup-recovery-doctor" \
+  "$ROOT_DIR/src/tools/backup-recovery-selftest" \
+  "$ROOT_DIR/src/tools/backup-recovery-recovery-drill" \
   "$ROOT_DIR/src/quickshell/scripts/backup-recovery/control_center.py" \
   "$ROOT_DIR/installer/shell_edit.py"
 bash -n "$ROOT_DIR/installer/install.sh" "$ROOT_DIR/installer/uninstall.sh"
@@ -319,7 +345,9 @@ mkdir -p "$STAGE" "$ROLLBACK/user" "$ROLLBACK/root"
 cp -a "$ROOT_DIR/src/quickshell/modules/ii/backupRecovery" "$STAGE/module"
 cp -a "$ROOT_DIR/src/quickshell/scripts/backup-recovery" "$STAGE/helper"
 cp -a "$ROOT_DIR/src/backend" "$STAGE/backend"
+cp -a "$ROOT_DIR/src/tools" "$STAGE/tools"
 cp -a "$ROOT_DIR/systemd" "$STAGE/systemd"
+cp -a "$ROOT_DIR/config/systemd-hardening.conf" "$STAGE/systemd-hardening.conf"
 cp -a "$GLOBAL" "$STAGE/GlobalStates.qml"
 cp -a "$FAMILY" "$STAGE/IllogicalImpulseFamily.qml"
 if [[ -f "$KEYBINDS" ]]; then
@@ -429,6 +457,14 @@ for unit in "${SYSTEM_UNITS[@]}"; do
   path="etc/systemd/system/$unit"
   sudo test -e "/$path" && ROOT_PATHS+=("$path") || true
 done
+for unit in "${HARDENED_SERVICES[@]}"; do
+  path="etc/systemd/system/${unit}.d"
+  sudo test -e "/$path" && ROOT_PATHS+=("$path") || true
+done
+for tool in "${TOOL_NAMES[@]}"; do
+  path="usr/local/bin/$tool"
+  sudo test -e "/$path" && ROOT_PATHS+=("$path") || true
+done
 
 if systemctl is-enabled backup-recovery-state.timer >/dev/null 2>&1; then
   echo enabled > "$ROLLBACK/root/state-timer-enabled"
@@ -460,7 +496,11 @@ rollback() {
   # Remove published public files.
   sudo rm -rf "$BACKEND_DST"
   sudo rm -f "$POLKIT_DST"
+  for tool in "${TOOL_NAMES[@]}"; do sudo rm -f "$TOOLS_DST/$tool"; done
   for unit in "${SYSTEM_UNITS[@]}"; do sudo rm -f "/etc/systemd/system/$unit"; done
+  for unit in "${HARDENED_SERVICES[@]}"; do
+    sudo rm -rf "/etc/systemd/system/${unit}.d"
+  done
 
   # Remove every root-side target published by this project, then restore the
   # exact pre-install snapshot (including ownership/modes) if one existed.
@@ -472,6 +512,10 @@ rollback() {
   for unit in "${SYSTEM_UNITS[@]}"; do
     sudo rm -f "/etc/systemd/system/$unit"
   done
+  for unit in "${HARDENED_SERVICES[@]}"; do
+    sudo rm -rf "/etc/systemd/system/${unit}.d"
+  done
+  for tool in "${TOOL_NAMES[@]}"; do sudo rm -f "$TOOLS_DST/$tool"; done
 
   if [[ -s "$ROLLBACK/root/root-snapshot.tar" ]]; then
     sudo tar -C / -xpf "$ROLLBACK/root/root-snapshot.tar"
@@ -530,26 +574,129 @@ sudo chown "root:$USER_GROUP" "$STATE_DIR"
 sudo chmod 0750 "$STATE_DIR"
 sudo install -m 0755 "$STAGE/backend/root_actions.py" "$BACKEND_DST/root_actions.py"
 sudo install -m 0755 "$STAGE/backend/state_collector.py" "$BACKEND_DST/state_collector.py"
+for tool in "${TOOL_NAMES[@]}"; do
+  sudo install -m 0755 "$STAGE/tools/$tool" "$TOOLS_DST/$tool"
+done
 sudo install -m 0640 "$STAGE/config.json" "$CONFIG_DST"
 
 for f in "$STAGE/systemd"/*; do
   sudo install -m 0644 "$f" "/etc/systemd/system/$(basename "$f")"
 done
+for unit in "${HARDENED_SERVICES[@]}"; do
+  sudo install -d -m 0755 "/etc/systemd/system/${unit}.d"
+  sudo install -m 0644 "$STAGE/systemd-hardening.conf" \
+    "/etc/systemd/system/${unit}.d/20-backup-recovery-hardening.conf"
+done
 sudo install -m 0644 "$STAGE/49-backup-recovery.rules" "$POLKIT_DST"
 
 tmpmeta="$(mktemp)"
-python3 - "$tmpmeta" "$PACKAGE_VERSION" "$UI_PROTOCOL" "$SCHEMA_VERSION" "$USER_NAME" <<'PY'
-import json, sys, time
-p,version,protocol,schema,user=sys.argv[1:]
+python3 - "$tmpmeta" "$PACKAGE_VERSION" "$UI_PROTOCOL" "$BACKEND_REVISION" \
+  "$SCHEMA_VERSION" "$USER_NAME" "$ROOT_DIR" "$MODULE_DST" "$HELPER_DST" <<'PY_META'
+from pathlib import Path
+import datetime
+import hashlib
+import json
+import subprocess
+import sys
+import time
+
+p,package_version,contract,backend,schema,user,root_dir,module_dst,helper_dst=sys.argv[1:]
+
+def sha256(path: str) -> str:
+    h=hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024*1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+tracked=[
+    "/usr/local/lib/backup-recovery/root_actions.py",
+    "/usr/local/lib/backup-recovery/state_collector.py",
+    "/usr/local/bin/backup-recovery-evidence",
+    "/usr/local/bin/backup-recovery-doctor",
+    "/usr/local/bin/backup-recovery-selftest",
+    "/usr/local/bin/backup-recovery-recovery-drill",
+    str(Path(helper_dst)/"control_center.py"),
+    str(Path(module_dst)/"BackupRecovery.qml"),
+    str(Path(module_dst)/"BackupRecoveryContent.qml"),
+    str(Path(module_dst)/"GlobalOperationBar.qml"),
+    "/etc/polkit-1/rules.d/49-backup-recovery.rules",
+]
+
+for unit in [
+    "backup-recovery-state.service",
+    "backup-recovery-state.timer",
+    "backup-recovery-backup.service",
+    "backup-recovery-timeshift.service",
+    "backup-recovery-restic-check.service",
+    "backup-recovery-restore-test.service",
+    "backup-recovery-smart-short.service",
+    "backup-recovery-smart-long.service",
+    "backup-recovery-mount.service",
+    "backup-recovery-eject.service",
+    "backup-recovery-refresh-manifests.service",
+]:
+    q=Path("/etc/systemd/system")/unit
+    if q.is_file():
+        tracked.append(str(q))
+
+for unit in [
+    "backup-recovery-backup.service",
+    "backup-recovery-eject.service",
+    "backup-recovery-mount.service",
+    "backup-recovery-refresh-manifests.service",
+    "backup-recovery-restic-check.service",
+    "backup-recovery-restore-test.service",
+    "backup-recovery-smart-long.service",
+    "backup-recovery-smart-short.service",
+    "backup-recovery-state.service",
+    "backup-recovery-timeshift.service",
+]:
+    q=Path("/etc/systemd/system")/(unit+".d/20-backup-recovery-hardening.conf")
+    if q.is_file():
+        tracked.append(str(q))
+
+files={q:sha256(q) for q in tracked if Path(q).is_file()}
+
+commit=""
+dirty=False
+try:
+    commit=subprocess.check_output(
+        ["git","-C",root_dir,"rev-parse","HEAD"], text=True
+    ).strip()
+    dirty=bool(subprocess.check_output(
+        ["git","-C",root_dir,"status","--porcelain"], text=True
+    ).strip())
+except Exception:
+    pass
+
+now=int(time.time())
 json.dump({
-  "package_version":version,
-  "ui_protocol":protocol,
-  "state_schema":int(schema),
-  "user":user,
-  "installed_at":int(time.time()),
-},open(p,"w"),indent=2)
+    "version":contract,
+    "package_version":package_version,
+    "ui_contract":contract,
+    "ui_protocol":contract,
+    "backend_revision":backend,
+    "state_schema":int(schema),
+    "user":user,
+    "installed_at":now,
+    "installed_at_iso":datetime.datetime.fromtimestamp(
+        now, datetime.timezone.utc
+    ).isoformat(),
+    "phase":"4B",
+    "release_stage":"public-release",
+    "local_closure":True,
+    "source_repo":{
+        "detected":bool(commit),
+        "verified":bool(commit) and not dirty,
+        "commit":commit,
+        "dirty":dirty,
+    },
+    "ci":{"verified":False},
+    "files":files,
+}, open(p,"w"), indent=2)
 open(p,"a").write("\n")
-PY
+PY_META
 sudo install -m 0644 "$tmpmeta" "$INSTALL_META"
 rm -f "$tmpmeta"
 
@@ -588,7 +735,7 @@ sudo -u "$USER_NAME" test -r "$STATE_DIR/state.json"
 # Wrapper runtime proof: stdout return values are intentionally not used.
 WRAPPER_OK=0
 for _ in {1..120}; do
-  if qs -c ii ipc call backupRecoveryProtocol2 ping >/dev/null 2>&1; then
+  if qs -c ii ipc call backupRecoveryV160 ping >/dev/null 2>&1; then
     WRAPPER_OK=1
     break
   fi
@@ -629,6 +776,11 @@ print("✓ no new Backup Recovery runtime errors detected")
 PY
 qs -c ii ipc call backupRecovery close >/dev/null 2>&1 || true
 ok "Visual surface mapped and runtime diagnostics passed"
+
+# Final installed-package integrity/architecture gates.
+"$TOOLS_DST/backup-recovery-doctor" --strict
+"$TOOLS_DST/backup-recovery-selftest" --strict
+ok "Installed deployment doctor + selftest passed"
 
 # Live shortcut must still belong to us after reload.
 python3 - "$KEY" <<'PY'

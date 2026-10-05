@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_VERSION="0.1.0-alpha.7"
+PACKAGE_VERSION="0.1.0-alpha.8"
 PURGE=0
 case "${1:-}" in
   "") ;;
@@ -64,8 +64,11 @@ sudo systemctl disable --now backup-recovery-state.timer >/dev/null 2>&1 || true
 for unit in "${SYSTEM_UNITS[@]}"; do
   sudo systemctl stop "$unit" >/dev/null 2>&1 || true
   sudo rm -f "/etc/systemd/system/$unit"
+  sudo rm -f "/etc/systemd/system/${unit}.d/20-backup-recovery-hardening.conf"
+  sudo rmdir "/etc/systemd/system/${unit}.d" 2>/dev/null || true
 done
 sudo rm -rf /usr/local/lib/backup-recovery
+sudo rm -f   /usr/local/bin/backup-recovery-evidence   /usr/local/bin/backup-recovery-doctor   /usr/local/bin/backup-recovery-selftest   /usr/local/bin/backup-recovery-recovery-drill
 sudo rm -f /etc/polkit-1/rules.d/49-backup-recovery.rules
 sudo rm -f /etc/backup-recovery/install.json
 

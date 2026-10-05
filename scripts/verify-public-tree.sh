@@ -43,7 +43,16 @@ echo "✓ shell syntax"
 python3 "$ROOT/tests/test_backend_safety.py"
 python3 "$ROOT/tests/test_shell_editor.py"
 python3 "$ROOT/tests/test_public_contract.py"
-bash "$ROOT/tests/test_installer_sandbox.sh"
+
+if [[ "${BRC_DELEGATE_INSTALLER_SANDBOX:-0}" == "1" ]]; then
+  if [[ "${CI:-}" != "true" ]]; then
+    echo "ERROR: BRC_DELEGATE_INSTALLER_SANDBOX is CI-only" >&2
+    exit 1
+  fi
+  echo "• Bubblewrap installer audit delegated to dedicated CI host job"
+else
+  bash "$ROOT/tests/test_installer_sandbox.sh"
+fi
 
 if ((bad)); then exit 1; fi
 echo "✓ public tree sanitization and regression audit passed"
