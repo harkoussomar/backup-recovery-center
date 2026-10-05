@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+CONFIG_FILE = Path('/etc/backup-recovery/config.json')
+STATE_DIR = Path('/var/lib/backup-recovery')
+MARKERS = {
+    'credential': STATE_DIR / 'credential-recovery.json',
+    'recovery-media': STATE_DIR / 'recovery-media.json',
+    'second-copy': STATE_DIR / 'second-copy.json',
+}
+VERIFIER_VERSION = '1.4.0-phase3'
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
+
+def write_json_atomic(path: Path, data: dict, mode: int = 0o640) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restic_repository_id(config: dict) -> str:
+    repo = str(config.get('restic_repo') or '')
+    password = str(config.get('restic_password_file') or '')
+    cache = str(config.get('restic_cache_dir') or '')
+    if not repo or not password or not Path(repo).is_dir() or not Path(password).is_file():
+        return ''
+    cp = subprocess.run(
+        ['restic', '-r', repo, '--password-file', password, '--cache-dir', cache, 'cat', 'config'],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    if cp.returncode != 0:
+        return ''
+    try:
+        return str(json.loads(cp.stdout or '{}').get('id') or '')
+    except json.JSONDecodeError:
+        return ''
+
+
+def chown_marker(path: Path, config: dict) -> None:
+    user = str(config.get('user') or '').strip()
+    if not user:
+        return
+    try:
+        gid = pwd.getpwnam(user).pw_gid
+        os.chown(path, 0, gid)
+        os.chmod(path, 0o640)
+    except (KeyError, OSError):
+        pass
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise SystemExit('This command must be run with sudo/root privileges.')
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    require_root()
+    config = read_json(CONFIG_FILE, {})
+    if not config:
+        raise SystemExit('Backup Recovery configuration is missing.')
+
+    marker = MARKERS[args.kind]
+    payload = {
+        'verified': True,
+        'verified_at': int(time.time()),
+        'kind': args.kind,
+        'label': args.label.strip(),
+        'identifier': (args.identifier or '').strip(),
+        'note': (args.note or '').strip(),
+        'backup_uuid': str(config.get('backup_uuid') or ''),
+        'repository_id': restic_repository_id(config) if args.kind == 'credential' else '',
+        'verifier_version': VERIFIER_VERSION,
+    }
+    write_json_atomic(marker, payload)
+    chown_marker(marker, config)
+    print(f'Verified {args.kind}: {payload["label"]}')
+    return 0
+
+
+def cmd_clear(args: argparse.Namespace) -> int:
+    require_root()
+    marker = MARKERS[args.kind]
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    print(f'Cleared {args.kind} evidence.')
+    return 0
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    for kind, path in MARKERS.items():
+        data = read_json(path, {})
+        if isinstance(data, dict) and data.get('verified') is True:
+            when = int(data.get('verified_at', 0) or 0)
+            print(f'{kind}: verified · {data.get("label") or "unlabeled"} · {when}')
+        else:
+            print(f'{kind}: not verified')
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='Manage non-secret Backup Recovery evidence attestations.'
+    )
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    verify = sub.add_parser('verify', help='Record explicit recovery evidence.')
+    verify.add_argument('kind', choices=sorted(MARKERS))
+    verify.add_argument('--label', required=True, help='Human-readable recovery location/media/copy label.')
+    verify.add_argument('--identifier', default='', help='Optional non-secret identifier.')
+    verify.add_argument('--note', default='', help='Optional non-secret note.')
+    verify.set_defaults(func=cmd_verify)
+
+    clear = sub.add_parser('clear', help='Remove one evidence marker.')
+    clear.add_argument('kind', choices=sorted(MARKERS))
+    clear.set_defaults(func=cmd_clear)
+
+    status = sub.add_parser('status', help='Show current evidence markers.')
+    status.set_defaults(func=cmd_status)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -29,6 +29,10 @@ fail_if 'tail[0-9A-Za-z.-]*\.ts\.net' 'Tailnet hostname'
 
 python3 -m py_compile \
   "$ROOT"/src/backend/*.py \
+  "$ROOT"/src/tools/backup-recovery-evidence \
+  "$ROOT"/src/tools/backup-recovery-doctor \
+  "$ROOT"/src/tools/backup-recovery-selftest \
+  "$ROOT"/src/tools/backup-recovery-recovery-drill \
   "$ROOT"/src/quickshell/scripts/backup-recovery/control_center.py \
   "$ROOT"/installer/shell_edit.py
 echo "✓ Python compile"

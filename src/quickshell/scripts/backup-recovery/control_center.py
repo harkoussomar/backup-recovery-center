@@ -9,8 +9,17 @@ from pathlib import Path
 
 HOME = Path.home()
 STATE_FILE = Path('/var/lib/backup-recovery/state.json')
+ACTION_STATE_FILE = Path('/var/lib/backup-recovery/action-state.json')
 DOTFILES_GIT = HOME / '.dotfiles'
-UI_CONTRACT = '2'
+DOTFILES_CACHE = HOME / '.cache/backup-recovery/dotfiles-state.json'
+UI_CONTRACT = '1.6.0'
+SCHEMA_VERSION = 2
+STATE_STALE_SECONDS = 1800
+
+EXTERNAL_BUSY_UNITS = {
+    'external-backup': 'restic-system-backup.service',
+    'external-maintenance': 'restic-maintenance.service',
+}
 
 ACTION_UNITS = {
     'backup': 'backup-recovery-backup.service',
@@ -43,13 +52,14 @@ def run(cmd: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(cmd, 124, '', str(exc))
 
 
-def unit_state(unit: str) -> dict:
-    cp = run([
-        'systemctl', 'show', unit,
-        '--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,InactiveEnterTimestamp',
-        '--no-pager',
-    ], timeout=5)
-    data = {
+UNIT_PROPERTIES = (
+    'Id,LoadState,ActiveState,SubState,Result,ExecMainStatus,'
+    'ActiveEnterTimestamp,InactiveEnterTimestamp'
+)
+
+
+def empty_unit_state(unit: str) -> dict:
+    return {
         'unit': unit,
         'load_state': 'unknown',
         'active_state': 'unknown',
@@ -57,31 +67,70 @@ def unit_state(unit: str) -> dict:
         'result': 'unknown',
         'exec_main_status': None,
     }
+
+
+def unit_states(units: list[str]) -> dict[str, dict]:
+    """Read many systemd unit states with one systemctl process."""
+    unique = list(dict.fromkeys(units))
+    result = {unit: empty_unit_state(unit) for unit in unique}
+    if not unique:
+        return result
+
+    cp = run([
+        'systemctl', 'show', *unique,
+        '--property=' + UNIT_PROPERTIES,
+        '--no-pager',
+    ], timeout=6)
     if cp.returncode != 0:
-        return data
+        return result
+
+    mapping = {
+        'LoadState': 'load_state',
+        'ActiveState': 'active_state',
+        'SubState': 'sub_state',
+        'Result': 'result',
+        'ExecMainStatus': 'exec_main_status',
+        'ActiveEnterTimestamp': 'active_enter_timestamp',
+        'InactiveEnterTimestamp': 'inactive_enter_timestamp',
+    }
+
+    block: dict[str, str] = {}
+
+    def flush() -> None:
+        nonlocal block
+        unit = block.get('Id', '')
+        if not unit or unit not in result:
+            block = {}
+            return
+        data = result[unit]
+        for key, field in mapping.items():
+            if key not in block:
+                continue
+            value = block[key]
+            if key == 'ExecMainStatus':
+                try:
+                    data[field] = int(value)
+                except ValueError:
+                    data[field] = None
+            else:
+                data[field] = value
+        block = {}
+
     for line in cp.stdout.splitlines():
-        if '=' not in line:
+        if not line.strip():
+            flush()
             continue
-        key, value = line.split('=', 1)
-        mapping = {
-            'LoadState': 'load_state',
-            'ActiveState': 'active_state',
-            'SubState': 'sub_state',
-            'Result': 'result',
-            'ExecMainStatus': 'exec_main_status',
-            'ActiveEnterTimestamp': 'active_enter_timestamp',
-            'InactiveEnterTimestamp': 'inactive_enter_timestamp',
-        }
-        if key not in mapping:
-            continue
-        if key == 'ExecMainStatus':
-            try:
-                data[mapping[key]] = int(value)
-            except ValueError:
-                data[mapping[key]] = None
-        else:
-            data[mapping[key]] = value
-    return data
+        if '=' in line:
+            key, value = line.split('=', 1)
+            if key == 'Id' and block:
+                flush()
+            block[key] = value
+    flush()
+    return result
+
+
+def unit_state(unit: str) -> dict:
+    return unit_states([unit]).get(unit, empty_unit_state(unit))
 
 
 def dotfiles_state() -> dict:
@@ -115,11 +164,42 @@ def dotfiles_state() -> dict:
     }
 
 
+
+def read_dotfiles_cache() -> dict:
+    try:
+        data = json.loads(DOTFILES_CACHE.read_text())
+        return data if isinstance(data, dict) else {
+            'available': False, 'clean': False, 'changed_count': None, 'latest': None
+        }
+    except Exception:
+        return {'available': False, 'clean': False, 'changed_count': None, 'latest': None}
+
+
+def refresh_dotfiles_cache() -> dict:
+    data = dotfiles_state()
+    try:
+        DOTFILES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DOTFILES_CACHE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False) + '\n')
+        tmp.replace(DOTFILES_CACHE)
+    except Exception:
+        pass
+    return data
+
 def fallback_state(message: str) -> dict:
     return {
-        'schema_version': 2,
+        'schema_version': SCHEMA_VERSION,
         'ui_contract': UI_CONTRACT,
+        'backend_revision': 'unavailable',
+        'deployment': {},
         'generated_at': 0,
+        'state_health': {
+            'compatible': True,
+            'fresh': False,
+            'age_seconds': None,
+            'refresh_ok': None,
+            'error': message,
+        },
         'overall': {
             'status': 'unverified',
             'label': 'Not verified',
@@ -140,6 +220,10 @@ def fallback_state(message: str) -> dict:
             'latest': None,
             'check': {'known': False, 'ok': None, 'time': 0},
             'restore_test': {'known': False, 'ok': None, 'time': 0},
+            'data_check': {'known': False, 'ok': None},
+            'backup_proof': {'known': False, 'ok': None, 'current': False},
+            'repository_id': '',
+            'scope': {},
             'timer': {},
             'maintenance_timer': {},
         },
@@ -164,14 +248,17 @@ def fallback_state(message: str) -> dict:
         },
         'recovery': {
             'core_ready': 0,
-            'core_total': 6,
+            'core_total': 7,
             'core_checks': [],
             'ready': 0,
-            'total': 6,
+            'total': 7,
             'checks': [],
             'resilience_checks': [],
-            'restore_doc': '',
+            'restore_doc': '/mnt/backup/recovery/RESTORE.md',
             'manifests_updated_at': 0,
+            'credential_evidence': {},
+            'recovery_media_evidence': {},
+            'second_copy_evidence': {},
         },
         'history': {
             'dotfiles': {'available': False, 'clean': False, 'changed_count': None, 'latest': None},
@@ -182,10 +269,118 @@ def fallback_state(message: str) -> dict:
         'actions': {},
         'action_running': False,
         'current_action': '',
+        'operation': {
+            'running': False, 'action': '', 'state': 'idle', 'phase': '',
+            'started_at': 0, 'updated_at': 0, 'finished_at': 0,
+            'elapsed_seconds': 0, 'progress': {}, 'message': '',
+        },
     }
 
 
-def load_state() -> dict:
+def validate_contract(data: dict) -> tuple[bool, str]:
+    try:
+        schema = int(data.get('schema_version'))
+    except (TypeError, ValueError):
+        schema = -1
+    contract = str(data.get('ui_contract') or '')
+    if schema != SCHEMA_VERSION:
+        return False, f'Incompatible state schema: expected {SCHEMA_VERSION}, got {schema}.'
+    if contract != UI_CONTRACT:
+        return False, f'Incompatible UI contract: expected {UI_CONTRACT}, got {contract or "missing"}.'
+    return True, ''
+
+
+def decorate_state_health(data: dict, *, refresh_ok: bool | None = None, refresh_error: str = '') -> dict:
+    generated = int(data.get('generated_at', 0) or 0)
+    age = max(0, int(time.time()) - generated) if generated else None
+    fresh = age is not None and age <= STATE_STALE_SECONDS
+    compatible, contract_error = validate_contract(data)
+    error = refresh_error or contract_error
+    data['state_health'] = {
+        'compatible': compatible,
+        'fresh': fresh,
+        'age_seconds': age,
+        'refresh_ok': refresh_ok,
+        'error': error,
+        'stale_after_seconds': STATE_STALE_SECONDS,
+    }
+    if not compatible:
+        data['overall'] = {
+            'status': 'critical',
+            'label': 'Incompatible',
+            'summary': contract_error,
+        }
+    elif refresh_ok is False:
+        data['overall'] = {
+            'status': 'unverified',
+            'label': 'State stale',
+            'summary': 'The latest privileged state refresh failed; displayed evidence is last-known only.',
+        }
+    elif not fresh:
+        data['overall'] = {
+            'status': 'unverified',
+            'label': 'State stale',
+            'summary': 'Backup state has not been refreshed recently enough to claim current protection.',
+        }
+    return data
+
+
+def read_action_state() -> dict:
+    try:
+        data = json.loads(ACTION_STATE_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def busy_units() -> list[tuple[str, str]]:
+    busy: list[tuple[str, str]] = []
+    named = {**ACTION_UNITS, **EXTERNAL_BUSY_UNITS}
+    states = unit_states(list(named.values()))
+    for name, unit in named.items():
+        item = states.get(unit, empty_unit_state(unit))
+        if item.get('active_state') in ('activating', 'active'):
+            busy.append((name, unit))
+    return busy
+
+
+def decorate_operation(data: dict, running_names: list[str], external_running: list[str]) -> None:
+    now = int(time.time())
+    running = running_names + external_running
+    current = running[0] if running else ''
+    raw = read_action_state()
+    op = {
+        'running': bool(running),
+        'action': current,
+        'state': 'running' if running else str(raw.get('state') or 'idle'),
+        'phase': '',
+        'started_at': 0,
+        'updated_at': 0,
+        'finished_at': 0,
+        'elapsed_seconds': 0,
+        'progress': {},
+        'message': '',
+    }
+    raw_action = str(raw.get('action') or '')
+    if raw and (not current or raw_action == current):
+        op.update(raw)
+        op['running'] = bool(running)
+    elif current:
+        op['action'] = current
+        op['phase'] = 'Operation in progress'
+    started = int(op.get('started_at') or 0)
+    finished = int(op.get('finished_at') or 0)
+    if started:
+        end = now if op.get('running') else (finished or int(op.get('updated_at') or now))
+        op['elapsed_seconds'] = max(0, end - started)
+    if not isinstance(op.get('progress'), dict):
+        op['progress'] = {}
+    data['operation'] = op
+    data['current_action'] = current
+    data['action_running'] = bool(running)
+
+
+def load_state(*, instant: bool = False, refresh_dotfiles: bool = False) -> dict:
     try:
         data = json.loads(STATE_FILE.read_text())
         if not isinstance(data, dict):
@@ -193,16 +388,51 @@ def load_state() -> dict:
     except Exception as exc:
         data = fallback_state(f'State unavailable: {exc}')
 
-    data.setdefault('history', {})['dotfiles'] = dotfiles_state()
-    actions = {name: unit_state(unit) for name, unit in ACTION_UNITS.items()}
+    compatible, message = validate_contract(data)
+    if not compatible:
+        # Do not let an incompatible backend silently drive the current frontend.
+        bad = fallback_state(message)
+        bad['schema_version'] = data.get('schema_version')
+        bad['ui_contract'] = data.get('ui_contract')
+        data = bad
+
+    data.setdefault('history', {})['dotfiles'] = (
+        refresh_dotfiles_cache() if refresh_dotfiles else read_dotfiles_cache()
+    )
+
+    if instant:
+        # Zero-subprocess open path: paint the last verified state immediately.
+        raw = read_action_state()
+        running = str(raw.get('state') or '') == 'running'
+        data['actions'] = {}
+        data['external_actions'] = {}
+        decorate_operation(data, [str(raw.get('action') or 'operation')] if running else [], [])
+        data['snapshot_mode'] = 'instant-cache'
+        return decorate_state_health(data)
+
+    named = {**ACTION_UNITS, **EXTERNAL_BUSY_UNITS}
+    states = unit_states(list(named.values()))
+    actions = {
+        name: states.get(unit, empty_unit_state(unit))
+        for name, unit in ACTION_UNITS.items()
+    }
+    external_actions = {
+        name: states.get(unit, empty_unit_state(unit))
+        for name, unit in EXTERNAL_BUSY_UNITS.items()
+    }
     data['actions'] = actions
+    data['external_actions'] = external_actions
     running = [
         name for name, item in actions.items()
         if item.get('active_state') in ('activating', 'active')
     ]
-    data['current_action'] = running[0] if running else ''
-    data['action_running'] = bool(running)
-    return data
+    external_running = [
+        name for name, item in external_actions.items()
+        if item.get('active_state') in ('activating', 'active')
+    ]
+    decorate_operation(data, running, external_running)
+    data['snapshot_mode'] = 'fast-live'
+    return decorate_state_health(data)
 
 
 def refresh_state() -> tuple[bool, str]:
@@ -221,6 +451,17 @@ def action(name: str) -> int:
             'error': 'unknown-action',
             'message': f'Unknown action: {name}',
         })
+    busy = busy_units()
+    if busy:
+        current, current_unit = busy[0]
+        return emit({
+            'ok': False,
+            'error': 'busy',
+            'message': f'{current.replace("-", " ").title()} is already in progress.',
+            'action': name,
+            'current_action': current,
+            'unit': current_unit,
+        })
     cp = run(['systemctl', 'start', '--no-block', unit], timeout=10)
     if cp.returncode != 0:
         return emit({
@@ -238,9 +479,12 @@ def main() -> int:
     cmd = args[0] if args else 'snapshot'
 
     if cmd == 'snapshot':
+        if '--instant' in args:
+            return emit(load_state(instant=True))
         if '--refresh' in args:
             ok, message = refresh_state()
-            data = load_state()
+            data = load_state(refresh_dotfiles=True)
+            data = decorate_state_health(data, refresh_ok=ok, refresh_error='' if ok else message)
             if not ok:
                 data['refresh_error'] = message
             return emit(data)
@@ -248,7 +492,8 @@ def main() -> int:
 
     if cmd == 'refresh':
         ok, message = refresh_state()
-        data = load_state()
+        data = load_state(refresh_dotfiles=True)
+        data = decorate_state_health(data, refresh_ok=ok, refresh_error='' if ok else message)
         data['refresh_ok'] = ok
         if not ok:
             data['refresh_error'] = message

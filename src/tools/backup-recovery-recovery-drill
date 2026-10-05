@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+STATE = Path('/var/lib/backup-recovery/state.json')
+CONTROL = Path.home() / '.config/quickshell/ii/scripts/backup-recovery/control_center.py'
+
+
+def read_state() -> dict[str, Any]:
+    try:
+        cp = subprocess.run(['python3', str(CONTROL), 'snapshot'], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        if cp.returncode == 0:
+            data=json.loads(cp.stdout)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    try:
+        data=json.loads(STATE.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def main() -> int:
+    ap=argparse.ArgumentParser(description='Read-only Backup & Recovery disaster-recovery drill planner')
+    ap.add_argument('--json', action='store_true')
+    ap.add_argument('--strict', action='store_true', help='exit non-zero until all core recovery evidence is ready')
+    args=ap.parse_args()
+
+    s=read_state()
+    recovery=s.get('recovery') if isinstance(s.get('recovery'), dict) else {}
+    restic=s.get('restic') if isinstance(s.get('restic'), dict) else {}
+    disk=s.get('disk') if isinstance(s.get('disk'), dict) else {}
+    checks=recovery.get('core_checks') if isinstance(recovery.get('core_checks'), list) else []
+    blockers=[]
+    ready=[]
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        label=str(item.get('label') or item.get('name') or 'Recovery check')
+        if item.get('ready'):
+            ready.append(label)
+        else:
+            blockers.append(label)
+
+    result={
+        'core_ready': int(recovery.get('core_ready') or 0),
+        'core_total': int(recovery.get('core_total') or 0),
+        'ready': ready,
+        'blockers': blockers,
+        'repository_id': str(restic.get('repository_id') or ''),
+        'snapshot_host': str((restic.get('scope') or {}).get('hostname') or '') if isinstance(restic.get('scope'), dict) else '',
+        'backup_uuid': str(disk.get('uuid') or ''),
+        'restore_doc': str(recovery.get('restore_doc') or ''),
+        'steps': [
+            'Boot trusted Arch recovery media.',
+            'Recover the Restic credential from the independently verified external location.',
+            'Attach/unlock the backup storage and verify the expected backup UUID.',
+            'Read RESTORE.md and current recovery manifests before modifying disks.',
+            'Initialize/mount the target filesystem and reinstall the minimal operating system as required.',
+            'Open the expected Restic repository and confirm its repository identity.',
+            'List snapshots filtered to the expected machine/scope and select the intended snapshot explicitly.',
+            'Restore a small validation sample first, verify it, then perform the required data restore.',
+            'Use Timeshift only for compatible system rollback scenarios; do not treat it as an independent physical backup.',
+            'After recovery, regenerate manifests, run repository verification, and create a fresh backup proof.',
+        ],
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print('Backup & Recovery — Disaster Recovery Drill (READ-ONLY)')
+        print()
+        print(f"Core recovery: {result['core_ready']} / {result['core_total']} ready")
+        print(f"Repository: {result['repository_id'][:12] + '…' if result['repository_id'] else 'not currently verified'}")
+        print(f"Expected host: {result['snapshot_host'] or 'unknown'}")
+        print(f"Backup UUID: {result['backup_uuid'] or 'unknown'}")
+        print()
+        if blockers:
+            print('Current blockers / pending evidence:')
+            for b in blockers:
+                print(f'  - {b}')
+            print()
+        print('Recovery sequence:')
+        for i, step in enumerate(result['steps'], 1):
+            print(f'  {i}. {step}')
+        print()
+        print('This command performs no mount, restore, backup, SMART, partition, or filesystem mutation.')
+
+    return 1 if args.strict and blockers else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

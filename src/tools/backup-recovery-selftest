@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+EXPECTED_SCHEMA = 2
+EXPECTED_CONTRACT = '1.6.0'
+EXPECTED_BACKEND = '1.6.0-phase4-final'
+
+CONTROL = Path.home() / '.config/quickshell/ii/scripts/backup-recovery/control_center.py'
+ROOT_ACTIONS = Path('/usr/local/lib/backup-recovery/root_actions.py')
+STATE_COLLECTOR = Path('/usr/local/lib/backup-recovery/state_collector.py')
+DOCTOR = Path('/usr/local/bin/backup-recovery-doctor')
+INSTALL = Path('/etc/backup-recovery/install.json')
+STATE = Path('/var/lib/backup-recovery/state.json')
+WRAPPER = Path.home() / '.config/quickshell/ii/modules/ii/backupRecovery/BackupRecovery.qml'
+CONTENT = Path.home() / '.config/quickshell/ii/modules/ii/backupRecovery/BackupRecoveryContent.qml'
+OPBAR = Path.home() / '.config/quickshell/ii/modules/ii/backupRecovery/GlobalOperationBar.qml'
+
+ACTION_UNITS = [
+    'backup-recovery-backup.service',
+    'backup-recovery-timeshift.service',
+    'backup-recovery-restic-check.service',
+    'backup-recovery-restore-test.service',
+    'backup-recovery-refresh-manifests.service',
+    'backup-recovery-smart-short.service',
+    'backup-recovery-smart-long.service',
+    'backup-recovery-mount.service',
+    'backup-recovery-eject.service',
+]
+
+
+def run(cmd: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except Exception as exc:
+        return subprocess.CompletedProcess(cmd, 124, '', str(exc))
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description='Read-only Phase 4B local closure self-test')
+    ap.add_argument('--json', action='store_true')
+    ap.add_argument('--strict', action='store_true', help='fail on closure-critical warnings; recovery-readiness warnings remain informational')
+    args = ap.parse_args()
+
+    checks: list[dict[str, str]] = []
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append({'name': name, 'status': status, 'detail': detail})
+
+    # 1. Deployment doctor
+    cp = run([str(DOCTOR), '--json', '--strict'])
+    try:
+        doctor = json.loads(cp.stdout) if cp.stdout.strip() else {}
+    except Exception:
+        doctor = {}
+    add('deployment doctor', 'pass' if cp.returncode == 0 and doctor.get('ok') else 'fail',
+        f"failures={doctor.get('failure_count', '?')} warnings={doctor.get('warning_count', '?')}")
+
+    # 2. Controller/live contract
+    cp = run(['python3', str(CONTROL), 'snapshot'])
+    try:
+        snap = json.loads(cp.stdout) if cp.returncode == 0 else {}
+    except Exception:
+        snap = {}
+    contract_good = (
+        snap.get('schema_version') == EXPECTED_SCHEMA
+        and str(snap.get('ui_contract') or '') == EXPECTED_CONTRACT
+        and str(snap.get('backend_revision') or '') == EXPECTED_BACKEND
+        and bool((snap.get('state_health') or {}).get('compatible'))
+    )
+    add('live controller contract', 'pass' if contract_good else 'fail',
+        f"schema={snap.get('schema_version')} ui={snap.get('ui_contract')} backend={snap.get('backend_revision')}")
+
+    # 3. Global operation state consistency
+    op = snap.get('operation') if isinstance(snap.get('operation'), dict) else {}
+    running = bool(op.get('running'))
+    action_running = bool(snap.get('action_running'))
+    add('global operation consistency', 'pass' if running == action_running else 'fail',
+        f"operation.running={running} action_running={action_running} action={op.get('action') or 'none'}")
+
+    # 4. No unexpected failed units
+    failed = []
+    active = []
+    for unit in ACTION_UNITS:
+        cp = run(['systemctl', 'is-failed', unit], timeout=5)
+        if cp.stdout.strip() == 'failed':
+            failed.append(unit)
+        cp = run(['systemctl', 'is-active', unit], timeout=5)
+        if cp.stdout.strip() in ('active', 'activating'):
+            active.append(unit)
+    add('action unit failures', 'fail' if failed else 'pass',
+        'failed: ' + ', '.join(failed) if failed else 'none')
+    add('action activity', 'info', 'active: ' + ', '.join(active) if active else 'idle')
+
+    # 5. Concurrency architecture present in deployed code
+    try:
+        root_text = ROOT_ACTIONS.read_text()
+        control_text = CONTROL.read_text()
+    except Exception as exc:
+        root_text = control_text = ''
+        add('concurrency source inspection', 'fail', str(exc))
+    else:
+        lock_good = (
+            "ACTION_LOCK_FILE = Path('/run/backup-recovery/storage.lock')" in root_text
+            and "lock_file(ACTION_LOCK_FILE, nonblocking=True)" in root_text
+            and "Busy:" in root_text
+            and "busy = busy_units()" in control_text
+            and "'error': 'busy'" in control_text
+        )
+        add('backend duplicate/conflict guard', 'pass' if lock_good else 'fail',
+            'global storage lock + controller busy rejection present' if lock_good else 'required lock/busy guard pattern missing')
+
+    # 6. Frontend global-operation/modal architecture
+    try:
+        wrapper = WRAPPER.read_text()
+        content = CONTENT.read_text()
+        opbar = OPBAR.read_text()
+    except Exception as exc:
+        add('frontend closure architecture', 'fail', str(exc))
+    else:
+        front_good = all([
+            'backupRecoveryV160' in wrapper,
+            'GlobalOperationBar {' in content,
+            'enabled: !root.overlayOpen' in content,
+            'Accessible.role: Accessible.Dialog' in content,
+            'id: dialogScrim' in content,
+            'Accessible.role: Accessible.StatusBar' in opbar,
+            'compactNavigation' in content,
+        ])
+        add('frontend closure architecture', 'pass' if front_good else 'fail',
+            'global operation + modal blocking + compact navigation present' if front_good else 'one or more final frontend invariants missing')
+
+    # 7. Deployment/source truth
+    install = read_json(INSTALL)
+    dep_good = (
+        install.get('version') == EXPECTED_CONTRACT
+        and install.get('phase') == '4B'
+        and install.get('release_stage') == 'local-closure'
+        and bool(install.get('local_closure'))
+    )
+    add('local closure metadata', 'pass' if dep_good else 'fail',
+        f"phase={install.get('phase')} stage={install.get('release_stage')} local={install.get('local_closure')}")
+    src = install.get('source_repo') if isinstance(install.get('source_repo'), dict) else {}
+    if src.get('detected'):
+        add('source repository provenance', 'info',
+            f"commit={str(src.get('commit') or '')[:12]} dirty={bool(src.get('dirty'))} linked={bool(src.get('verified'))}")
+    else:
+        add('source repository provenance', 'warn',
+            'no Git repository detected from deployed paths; local runtime closure is valid, but source/CI release provenance is not proven')
+    ci = install.get('ci') if isinstance(install.get('ci'), dict) else {}
+    add('source CI provenance', 'info' if ci.get('verified') else 'warn',
+        'verified' if ci.get('verified') else 'not verified by the local deployment closure')
+
+    # 8. Recovery evidence is intentionally informational, never faked.
+    recovery = snap.get('recovery') if isinstance(snap.get('recovery'), dict) else {}
+    core_ready = int(recovery.get('core_ready') or 0)
+    core_total = int(recovery.get('core_total') or 0)
+    add('recovery readiness', 'info',
+        f"{core_ready}/{core_total} core checks ready; pending evidence is not auto-attested")
+    restic = snap.get('restic') if isinstance(snap.get('restic'), dict) else {}
+    proof = restic.get('backup_proof') if isinstance(restic.get('backup_proof'), dict) else {}
+    add('latest backup proof', 'info',
+        f"current={bool(proof.get('current'))} snapshot={str(proof.get('snapshot_id') or '')[:8] or 'pending'}")
+
+    failures = [c for c in checks if c['status'] == 'fail']
+    warnings = [c for c in checks if c['status'] == 'warn']
+
+    # Missing source/CI provenance does not invalidate the *local* deployment closure.
+    closure_critical_warnings = []
+    if args.strict:
+        closure_critical_warnings = [c for c in warnings if c['name'] not in ('source repository provenance', 'source CI provenance')]
+
+    result = {
+        'ok': not failures and not closure_critical_warnings,
+        'contract': EXPECTED_CONTRACT,
+        'backend_revision': EXPECTED_BACKEND,
+        'checks': checks,
+        'failure_count': len(failures),
+        'warning_count': len(warnings),
+        'local_closure': not failures and not closure_critical_warnings,
+        'source_release_provenance_verified': bool(src.get('verified')) and bool(ci.get('verified')),
+        'generated_at': int(time.time()),
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        sym = {'pass':'✓','fail':'✗','warn':'⚠','info':'•'}
+        for c in checks:
+            print(f"{sym[c['status']]} {c['name']}: {c['detail']}")
+        print()
+        if result['ok']:
+            print('PASS — Phase 4B local deployment closure checks succeeded')
+        else:
+            print(f"FAIL — {len(failures)} failure(s), {len(closure_critical_warnings)} closure-critical warning(s)")
+
+    return 0 if result['ok'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
