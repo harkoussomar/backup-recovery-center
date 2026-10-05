@@ -90,7 +90,16 @@ assert "'public-release'" in doctor
 assert "'public-release'" in selftest
 
 workflow=(ROOT/".github/workflows/verify.yml").read_text()
-assert "bubblewrap" in workflow
+assert "container: archlinux:latest" in workflow
+assert "installer-sandbox:" in workflow
+assert 'BRC_DELEGATE_INSTALLER_SANDBOX: "1"' in workflow
+assert "sudo apt-get install -y bubblewrap" in workflow
+assert "Zero-network installer audit" in workflow
+assert "Verify Bubblewrap namespace support" in workflow
+
+verifier=(ROOT/"scripts/verify-public-tree.sh").read_text()
+assert "BRC_DELEGATE_INSTALLER_SANDBOX" in verifier
+assert "CI-only" in verifier
 
 sandbox=(ROOT/"tests/test_installer_sandbox.sh").read_text()
 assert "--share-net" not in sandbox
