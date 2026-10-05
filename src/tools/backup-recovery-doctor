@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+INSTALL_FILE = Path('/etc/backup-recovery/install.json')
+CONFIG_FILE = Path('/etc/backup-recovery/config.json')
+STATE_DIR = Path('/var/lib/backup-recovery')
+STATE_FILE = STATE_DIR / 'state.json'
+EXPECTED_SCHEMA = 2
+EXPECTED_CONTRACT = '1.6.0'
+EXPECTED_BACKEND = '1.6.0-phase4-final'
+STATE_STALE_SECONDS = 1800
+
+SERVICES = [
+    'backup-recovery-backup.service',
+    'backup-recovery-eject.service',
+    'backup-recovery-mount.service',
+    'backup-recovery-refresh-manifests.service',
+    'backup-recovery-restic-check.service',
+    'backup-recovery-restore-test.service',
+    'backup-recovery-smart-long.service',
+    'backup-recovery-smart-short.service',
+    'backup-recovery-state.service',
+    'backup-recovery-timeshift.service',
+]
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+    except Exception as exc:
+        return subprocess.CompletedProcess(cmd, 124, '', str(exc))
+
+
+def mode(path: Path) -> int | None:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Read-only Backup & Recovery deployment doctor')
+    parser.add_argument('--json', action='store_true', help='emit machine-readable JSON')
+    parser.add_argument('--strict', action='store_true', help='treat stale state as failure')
+    args = parser.parse_args()
+
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append({'name': name, 'status': status, 'detail': detail})
+
+    install = read_json(INSTALL_FILE)
+    if not install:
+        add('deployment metadata', 'fail', f'{INSTALL_FILE} missing or invalid')
+    else:
+        good = (
+            str(install.get('version') or '') == EXPECTED_CONTRACT
+            and str(install.get('ui_contract') or '') == EXPECTED_CONTRACT
+            and str(install.get('backend_revision') or '') == EXPECTED_BACKEND
+            and int(install.get('state_schema') or -1) == EXPECTED_SCHEMA
+        )
+        add('deployment metadata', 'pass' if good else 'fail',
+            f"version={install.get('version')} backend={install.get('backend_revision')} schema={install.get('state_schema')}")
+        release_good = (
+            str(install.get('phase') or '') == '4B'
+            and str(install.get('release_stage') or '') == 'local-closure'
+            and bool(install.get('local_closure')) is True
+        )
+        add('local closure metadata', 'pass' if release_good else 'fail',
+            f"phase={install.get('phase')} stage={install.get('release_stage')} local_closure={install.get('local_closure')}")
+        src = install.get('source_repo') if isinstance(install.get('source_repo'), dict) else {}
+        if src.get('detected'):
+            detail = f"commit={str(src.get('commit') or '')[:12]} dirty={bool(src.get('dirty'))} linked={bool(src.get('verified'))}"
+            add('source repository', 'info', detail)
+        else:
+            add('source repository', 'info', 'not detected from deployed paths; source/CI release verification remains external')
+        ci = install.get('ci') if isinstance(install.get('ci'), dict) else {}
+        add('source CI', 'info', 'verified' if ci.get('verified') else 'not verified by local deployment closure')
+
+    files = install.get('files') if isinstance(install.get('files'), dict) else {}
+    if files:
+        mismatches: list[str] = []
+        missing: list[str] = []
+        for raw_path, expected in files.items():
+            p = Path(raw_path)
+            if not p.is_file():
+                missing.append(raw_path)
+                continue
+            try:
+                actual = sha256(p)
+            except OSError:
+                missing.append(raw_path)
+                continue
+            if actual != expected:
+                mismatches.append(raw_path)
+        if missing:
+            add('deployed file integrity', 'fail', 'missing: ' + ', '.join(missing))
+        elif mismatches:
+            add('deployed file integrity', 'fail', 'hash mismatch: ' + ', '.join(mismatches))
+        else:
+            add('deployed file integrity', 'pass', f'{len(files)} deployed files match install metadata')
+    else:
+        add('deployed file integrity', 'fail', 'no file hash inventory in install metadata')
+
+    state = read_json(STATE_FILE)
+    if not state:
+        add('runtime state', 'fail', f'{STATE_FILE} missing or invalid')
+    else:
+        contract_good = (
+            int(state.get('schema_version') or -1) == EXPECTED_SCHEMA
+            and str(state.get('ui_contract') or '') == EXPECTED_CONTRACT
+            and str(state.get('backend_revision') or '') == EXPECTED_BACKEND
+        )
+        add('runtime contract', 'pass' if contract_good else 'fail',
+            f"schema={state.get('schema_version')} ui={state.get('ui_contract')} backend={state.get('backend_revision')}")
+        generated = int(state.get('generated_at') or 0)
+        age = max(0, int(time.time()) - generated) if generated else 10**9
+        state_status = 'pass' if age <= STATE_STALE_SECONDS else ('fail' if args.strict else 'warn')
+        add('runtime freshness', state_status, f'{age}s old')
+        op = state.get('operation') if isinstance(state.get('operation'), dict) else {}
+        add('operation state', 'info',
+            f"{op.get('action') or 'none'} · {op.get('state') or 'idle'}" if op.get('running') else 'idle')
+
+        overall = state.get('overall') if isinstance(state.get('overall'), dict) else {}
+        add('protection readiness', 'info', f"{overall.get('label') or 'unknown'} · {overall.get('summary') or ''}".strip())
+        recovery = state.get('recovery') if isinstance(state.get('recovery'), dict) else {}
+        add('core recovery', 'info', f"{recovery.get('core_ready', 0)} / {recovery.get('core_total', 0)} ready")
+
+    config_mode = mode(CONFIG_FILE)
+    add('config permissions', 'pass' if config_mode == 0o640 else 'fail',
+        'missing' if config_mode is None else oct(config_mode))
+    state_mode = mode(STATE_DIR)
+    add('state directory permissions', 'pass' if state_mode == 0o750 else 'fail',
+        'missing' if state_mode is None else oct(state_mode))
+
+    unit_failures: list[str] = []
+    missing_hardening: list[str] = []
+    for unit in SERVICES:
+        cp = run(['systemctl', 'is-failed', unit])
+        if cp.stdout.strip() == 'failed':
+            unit_failures.append(unit)
+        hardening = Path(f'/etc/systemd/system/{unit}.d/20-backup-recovery-hardening.conf')
+        if not hardening.is_file():
+            missing_hardening.append(unit)
+    add('systemd unit health', 'fail' if unit_failures else 'pass',
+        'failed: ' + ', '.join(unit_failures) if unit_failures else f'{len(SERVICES)} Backup Recovery units not failed')
+    add('systemd hardening', 'fail' if missing_hardening else 'pass',
+        'missing: ' + ', '.join(missing_hardening) if missing_hardening else f'{len(SERVICES)} hardening drop-ins present')
+
+    failures = [c for c in checks if c['status'] == 'fail']
+    warnings = [c for c in checks if c['status'] == 'warn']
+    result = {
+        'ok': not failures,
+        'contract': EXPECTED_CONTRACT,
+        'backend_revision': EXPECTED_BACKEND,
+        'checks': checks,
+        'failure_count': len(failures),
+        'warning_count': len(warnings),
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        symbols = {'pass': '✓', 'warn': '⚠', 'fail': '✗', 'info': '•'}
+        for c in checks:
+            print(f"{symbols[c['status']]} {c['name']}: {c['detail']}")
+        print()
+        print('PASS — deployment integrity checks succeeded' if not failures else f'FAIL — {len(failures)} deployment integrity check(s) failed')
+
+    return 0 if not failures else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

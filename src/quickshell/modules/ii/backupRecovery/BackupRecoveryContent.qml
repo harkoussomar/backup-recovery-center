@@ -11,13 +11,101 @@ Item {
     id: root
     signal closeRequested()
 
+    property string captureScreenName: ""
+
+    // phase4e-consolidated-surface-deformation-v1
+    // phase4d-large-surface-deformation-v1
+    // prism-v2-phase7: final Prism modals use spatial lift + uniform scale.
+    // Preserve the older non-uniform deformation path for other styles only.
+    readonly property bool largeSurfaceDeformationEnabled:
+        Appearance.surfaceDeformation.enabled
+        && !Appearance.prismMode
+
+    property real largeSurfaceScaleX: 1
+    property real largeSurfaceScaleY: 1
+    property real largeSurfaceRadiusScale: 1
+
+    function resetLargeSurfaceDeformation() {
+        largeSurfaceDeformAnimation.stop()
+        root.largeSurfaceScaleX = 1
+        root.largeSurfaceScaleY = 1
+        root.largeSurfaceRadiusScale = 1
+    }
+
+    function kickLargeSurfaceDeformation() {
+        largeSurfaceDeformAnimation.stop()
+
+        if (!root.largeSurfaceDeformationEnabled) {
+            root.resetLargeSurfaceDeformation()
+            return
+        }
+
+        root.largeSurfaceScaleX = Appearance.surfaceDeformation.largeStartX
+        root.largeSurfaceScaleY = Appearance.surfaceDeformation.largeStartY
+        root.largeSurfaceRadiusScale = Appearance.surfaceDeformation.largeRadiusStart
+        largeSurfaceDeformAnimation.restart()
+    }
+
+    onLargeSurfaceDeformationEnabledChanged: {
+        if (!root.largeSurfaceDeformationEnabled)
+            root.resetLargeSurfaceDeformation()
+    }
+
+    function syncShellCaptureRegion() {
+        if (
+            !GlobalStates.backupRecoveryOpen
+            || root.captureScreenName.length === 0
+            || modal.width <= 0
+            || modal.height <= 0
+        ) {
+            GlobalStates.clearCaptureRegion("backupRecovery")
+            return
+        }
+
+        GlobalStates.registerCaptureRegion(
+            "backupRecovery",
+            root.captureScreenName,
+            modal.x,
+            modal.y,
+            modal.width,
+            modal.height,
+            160,
+            "Backup & Recovery"
+        )
+    }
+
+    onCaptureScreenNameChanged:
+        Qt.callLater(() => root.syncShellCaptureRegion())
+
+    Connections {
+        target: GlobalStates
+
+        function onBackupRecoveryOpenChanged() {
+            if (GlobalStates.backupRecoveryOpen) {
+                root.resetLargeSurfaceDeformation()
+                root.modalShown = false
+                modalOpenKickTimer.restart()
+            } else {
+                root.resetLargeSurfaceDeformation()
+                root.modalShown = false
+            }
+            Qt.callLater(() => root.syncShellCaptureRegion())
+        }
+    }
+
     property string helperPath: Quickshell.shellPath("scripts/backup-recovery/control_center.py")
     property int selectedPage: 0
     property int activePage: 0
     property int previousPage: 0
     property bool pageShown: true
     property real pageShift: 0
+    property int pageDirection: 1
+    property bool pageTransitioning: false
+    property bool modalShown: false
     property bool loading: false
+    property bool initialStateReady: false
+    property bool backgroundRefreshing: false
+    property string snapshotRequestKind: ""
     property bool actionPending: false
     property string lastRequestedAction: ""
     property int actionWaitTicks: 0
@@ -28,23 +116,43 @@ Item {
     property string confirmAction: ""
     property string confirmTitle: ""
     property string confirmDetail: ""
+    readonly property int expectedSchemaVersion: 2
+    readonly property string expectedUiContract: "1.6.0"
+    property string stateContractError: ""
+    property real operationClock: Date.now() / 1000
+    readonly property bool globallyBusy: root.actionPending || root.protectionState.action_running === true
+    readonly property bool overlayOpen: root.helpOpen || root.confirmOpen
+    readonly property bool compactNavigation: root.width < 960
+    readonly property var currentOperation: root.protectionState.operation || ({})
+
+    onHelpOpenChanged: {
+        if (root.helpOpen) Qt.callLater(() => helpCloseButton.forceActiveFocus())
+        else if (!root.confirmOpen) Qt.callLater(() => root.forceActiveFocus())
+    }
+    onConfirmOpenChanged: {
+        if (root.confirmOpen) Qt.callLater(() => confirmCancelButton.forceActiveFocus())
+        else if (!root.helpOpen) Qt.callLater(() => root.forceActiveFocus())
+    }
 
     property var protectionState: ({
         schema_version: 2,
-        ui_contract: "2",
+        ui_contract: "1.6.0",
+        deployment: {},
         generated_at: 0,
-        overall: {status:"unverified", label:"Not verified", summary:"Collecting backup state…"},
-        disk: {connected:false, mounted:false, status:"offline", filesystem_accessible:false, free_bytes:0, total_bytes:0, model:"", transport:"", used_percent:0},
-        restic: {configured:false, known:false, availability:"unavailable", count:null, snapshots:[], latest:null, age_hours:null, check:{known:false,ok:null,time:0}, restore_test:{known:false,ok:null,time:0}, timer:{}, maintenance_timer:{}},
-        timeshift: {configured:false, known:false, availability:"unavailable", count:null, snapshots:[], latest:null, mode:"RSYNC", schedule:{daily:false,daily_keep:0,weekly:false,weekly_keep:0}},
+        overall: {status:"unverified", label:"Not verified", summary:"Loading last-known backup state…"},
+        disk: {connected:false, mounted:false, mounted_identity_verified:false, status:"offline", filesystem_accessible:false, free_bytes:0, total_bytes:0, model:"", transport:"", used_percent:0},
+        restic: {configured:false, known:false, availability:"unavailable", current_state:"unavailable", count:null, snapshots:[], latest:null, age_hours:null, freshness:"unknown", check:{known:false,ok:null,time:0,freshness:"unknown"}, restore_test:{known:false,ok:null,time:0,freshness:"unknown"}, timer:{}, maintenance_timer:{}},
+        timeshift: {configured:false, known:false, availability:"unavailable", count:null, snapshots:[], latest:null, age_hours:null, freshness:"unknown", mode:"RSYNC", schedule:{daily:false,daily_keep:0,weekly:false,weekly_keep:0}},
         smart: {known:false, available:false, availability:"unavailable", health:"unknown", condition:"unknown", temperature_c:null, attributes:{}, historical_error_count:null, last_test:null, test_durations:{}},
-        recovery: {core_ready:0,core_total:6,core_checks:[],ready:0,total:6,checks:[],resilience_checks:[],restore_doc:"",manifests_updated_at:0},
+        recovery: {core_ready:0,core_total:7,core_checks:[],ready:0,total:7,checks:[],resilience_checks:[],restore_doc:"/mnt/backup/recovery/RESTORE.md",manifests_updated_at:0,manifests_freshness:"unknown",manifests_fresh:false,credential_evidence:{},recovery_media_evidence:{},second_copy_evidence:{}},
         history: {dotfiles:{available:false,clean:false,changed_count:null,latest:null},etc:{available:false,clean:false,changed_count:null,latest:null}},
         attention: [],
         activity: [],
         actions: ({}),
         action_running: false,
-        current_action: ""
+        current_action: "",
+        operation: {running:false,action:"",state:"idle",phase:"",started_at:0,updated_at:0,finished_at:0,elapsed_seconds:0,progress:{},message:""},
+        state_health: {compatible:true,fresh:false,age_seconds:null,refresh_ok:null,error:""}
     })
 
     readonly property var pages: [
@@ -59,9 +167,15 @@ Item {
     focus: true
 
     Component.onCompleted: {
+        root.modalShown = false
+        modalOpenKickTimer.restart()
         Qt.callLater(() => root.forceActiveFocus())
-        root.refresh(true)
+        Qt.callLater(() => root.syncShellCaptureRegion())
+        root.refreshInstant()
     }
+
+    Component.onDestruction:
+        GlobalStates.clearCaptureRegion("backupRecovery")
 
     Keys.priority: Keys.AfterItem
     Keys.onPressed: event => {
@@ -69,6 +183,9 @@ Item {
             if (root.confirmOpen) root.confirmOpen = false
             else if (root.helpOpen) root.helpOpen = false
             else root.closeRequested()
+            event.accepted = true
+        } else if (root.overlayOpen) {
+            // Phase 4 modal boundary: background shortcuts/pages stay inert.
             event.accepted = true
         } else if (event.modifiers === Qt.ControlModifier && event.key === Qt.Key_R) {
             root.refresh(true)
@@ -80,27 +197,150 @@ Item {
         }
     }
 
-    function switchPage(index) {
-        const next = Math.max(0, Math.min(root.pages.length - 1, index))
-        if (next === root.selectedPage) return
-        root.previousPage = root.selectedPage
-        root.selectedPage = next
-        root.pageShift = next > root.previousPage ? 8 : -8
-        root.pageShown = false
-        pageTimer.restart()
+    function trustedMount() {
+        const d = root.protectionState.disk || ({})
+        return d.mounted === true
+            && d.mounted_identity_verified === true
+            && d.filesystem_accessible === true
     }
 
-    function refresh(full) {
+    function stateIsCompatible(data) {
+        if (!data) return false
+        return Number(data.schema_version) === root.expectedSchemaVersion
+            && String(data.ui_contract || "") === root.expectedUiContract
+    }
+
+    function stateHealthText() {
+        const h = root.protectionState.state_health || ({})
+        if (root.stateContractError.length > 0) return root.stateContractError
+        if (h.refresh_ok === false) return h.error || "State refresh failed"
+        if (h.fresh === false && h.age_seconds !== null && h.age_seconds !== undefined)
+            return `State is ${Math.floor(Number(h.age_seconds) / 60)}m old`
+        return ""
+    }
+
+    function displayOverallLabel() {
+        return root.stateContractError.length > 0
+            ? "Incompatible"
+            : (root.protectionState.overall.label || "Checking")
+    }
+
+    function displayOverallSummary() {
+        if (root.stateContractError.length > 0) return root.stateContractError
+        return root.protectionState.overall.summary || "System protection & disaster recovery"
+    }
+
+    function switchPage(index) {
+        const next = Math.max(0, Math.min(root.pages.length - 1, index))
+        if (next === root.selectedPage || root.pageTransitioning)
+            return
+
+        root.previousPage = root.selectedPage
+        root.pageDirection = next > root.previousPage ? 1 : -1
+        root.selectedPage = next
+        root.pageTransitioning = true
+        pageOutAnimation.restart()
+    }
+
+    function refreshInstant() {
         if (snapshotProc.running) return
         root.loading = true
+        root.backgroundRefreshing = false
+        root.snapshotRequestKind = "instant"
+        snapshotProc.command = ["python3", root.helperPath, "snapshot", "--instant"]
+        snapshotProc.running = true
+    }
+
+    function refresh(full, background) {
+        if (snapshotProc.running) return
+        const isBackground = background === true
+        root.loading = !isBackground
+        root.backgroundRefreshing = isBackground
+        root.snapshotRequestKind = full
+            ? (isBackground ? "background-full" : "full")
+            : (isBackground ? "background-fast" : "fast")
         snapshotProc.command = full
             ? ["python3", root.helperPath, "snapshot", "--refresh"]
             : ["python3", root.helperPath, "snapshot"]
         snapshotProc.running = true
     }
 
+    function operationElapsedSeconds() {
+        const op = root.currentOperation || ({})
+        const started = Number(op.started_at || 0)
+        if (!started) return Number(op.elapsed_seconds || 0)
+        if (root.globallyBusy) return Math.max(0, Math.floor(root.operationClock - started))
+        return Number(op.elapsed_seconds || 0)
+    }
+
+    function twoDigits(value) {
+        const n = Math.max(0, Math.floor(Number(value || 0)))
+        return n < 10 ? `0${n}` : `${n}`
+    }
+
+    function durationText(seconds) {
+        let value = Math.max(0, Math.floor(Number(seconds || 0)))
+        const hours = Math.floor(value / 3600)
+        value -= hours * 3600
+        const mins = Math.floor(value / 60)
+        const secs = value - mins * 60
+        if (hours > 0) return `${hours}h ${root.twoDigits(mins)}m ${root.twoDigits(secs)}s`
+        if (mins > 0) return `${mins}m ${root.twoDigits(secs)}s`
+        return `${secs}s`
+    }
+
+    function operationPercent() {
+        const progress = (root.currentOperation || ({})).progress || ({})
+        const value = Number(progress.percent)
+        return isNaN(value) ? -1 : Math.max(0, Math.min(100, value))
+    }
+
+    function progressBytesText(value) {
+        const n = Number(value || 0)
+        if (n <= 0) return ""
+        if (n >= 1073741824) return `${(n / 1073741824).toFixed(1)} GiB`
+        if (n >= 1048576) return `${(n / 1048576).toFixed(1)} MiB`
+        if (n >= 1024) return `${(n / 1024).toFixed(0)} KiB`
+        return `${Math.round(n)} B`
+    }
+
+    function operationMetaText() {
+        const progress = (root.currentOperation || ({})).progress || ({})
+        const parts = [root.durationText(root.operationElapsedSeconds())]
+        const filesDone = Number(progress.files_done || 0)
+        const filesTotal = Number(progress.files_total || 0)
+        if (filesTotal > 0) parts.push(`${Math.floor(filesDone)} / ${Math.floor(filesTotal)} files`)
+        const bytesDone = root.progressBytesText(progress.bytes_done)
+        const bytesTotal = root.progressBytesText(progress.bytes_total)
+        if (bytesDone.length > 0 && bytesTotal.length > 0) parts.push(`${bytesDone} / ${bytesTotal}`)
+        const eta = Number(progress.eta_seconds || 0)
+        if (eta > 0) parts.push(`~${root.durationText(eta)} remaining`)
+        return parts.join(" · ")
+    }
+
+    function currentOperationAction() {
+        return String(root.protectionState.current_action || root.currentOperation.action || root.lastRequestedAction || "")
+    }
+
+    function actionButtonLabel(name, normalLabel) {
+        return root.currentOperationAction() === name && root.globallyBusy
+            ? `${root.actionLabel(name)} running`
+            : normalLabel
+    }
+
     function requestAction(name) {
-        if (actionProc.running || root.actionPending) return
+        if (root.stateContractError.length > 0) {
+            root.toastError = true
+            root.toastMessage = "Actions blocked: incompatible backup state contract"
+            toastTimer.restart()
+            return
+        }
+        if (actionProc.running || root.globallyBusy) {
+            root.toastError = true
+            root.toastMessage = `${root.actionLabel(root.currentOperationAction() || "operation")} is already in progress`
+            toastTimer.restart()
+            return
+        }
         root.lastRequestedAction = name
         root.actionPending = true
         root.actionWaitTicks = 0
@@ -110,6 +350,7 @@ Item {
     }
 
     function confirm(name, title, detail) {
+        root.helpOpen = false
         root.confirmAction = name
         root.confirmTitle = title
         root.confirmDetail = detail
@@ -126,6 +367,8 @@ Item {
         if (name === "mount") return "Mount"
         if (name === "eject") return "Safe unmount"
         if (name === "refresh-manifests") return "Recovery refresh"
+        if (name === "external-backup") return "Backup"
+        if (name === "external-maintenance") return "Repository maintenance"
         return name
     }
 
@@ -215,6 +458,7 @@ Item {
     }
 
     function overallPillState() {
+        if (root.stateContractError.length > 0) return "danger"
         const status = root.protectionState.overall.status
         return status === "critical" ? "danger"
              : status === "protected" || status === "protected-unmounted" || status === "protected-offline" ? "active"
@@ -223,8 +467,9 @@ Item {
 
     function diskSubtitle() {
         const d = root.protectionState.disk
-        if (d.mounted && d.filesystem_accessible) return `${root.bytesText(d.free_bytes)} free`
-        if (d.mounted) return "Mounted · filesystem unavailable"
+        if (root.trustedMount()) return `${root.bytesText(d.free_bytes)} free · identity verified`
+        if (d.status === "wrong-filesystem-mounted") return "Blocked · filesystem identity mismatch"
+        if (d.mounted) return "Mounted · identity/access unverified"
         if (d.connected) return "Connected · not mounted"
         const latest = root.protectionState.restic.latest
         return latest ? `Offline · last backup ${root.ageText(latest.time)}` : "Offline by design"
@@ -258,7 +503,7 @@ Item {
         if (!test) return root.domainFreshness(root.protectionState.smart)
         const progress = test.status_label === "Passed" ? "Completed"
             : test.status_label === "Running" ? `${test.completed_percent || 0}% complete`
-            : test.status_label === "Aborted by user" ? `${test.completed_percent || 0}% completed before abort`
+            : (test.status_label === "Aborted by host/system" || test.status_label === "Aborted by user") ? `${test.completed_percent || 0}% completed before abort`
             : `${test.completed_percent || 0}% complete`
         return `${progress} · at ${test.lifetime_hours || "?"} power-on hours`
     }
@@ -294,6 +539,7 @@ Item {
         if (check.state === "recommended") return "Recommended"
         if (check.state === "untested") return "Untested"
         if (check.state === "failed") return "Failed"
+        if (check.state === "stale") return "Stale"
         if (check.state === "missing") return "Missing"
         if (check.state === "pending") return "Pending"
         return "Unknown"
@@ -316,9 +562,9 @@ Item {
     }
 
     function openRestoreGuide() {
-        if (!root.protectionState.disk.mounted) {
+        if (!root.trustedMount() || !root.protectionState.recovery.restore_doc_known) {
             root.toastError = true
-            root.toastMessage = "Connect and mount the backup HDD first"
+            root.toastMessage = "Mount and verify the backup HDD and recovery guide first"
             toastTimer.restart()
             return
         }
@@ -329,14 +575,42 @@ Item {
         id: snapshotProc
         stdout: StdioCollector {
             onStreamFinished: {
+                const completedKind = root.snapshotRequestKind
                 root.loading = false
+                root.backgroundRefreshing = false
+                root.snapshotRequestKind = ""
                 try {
-                    root.protectionState = JSON.parse(text)
+                    const data = JSON.parse(text)
+                    if (!root.stateIsCompatible(data)) {
+                        root.stateContractError = `Incompatible backup state contract · expected schema ${root.expectedSchemaVersion} / UI ${root.expectedUiContract}, got ${data.schema_version !== undefined ? data.schema_version : "?"} / ${data.ui_contract !== undefined ? data.ui_contract : "?"}`
+                        root.toastError = true
+                        root.toastMessage = root.stateContractError
+                        toastTimer.restart()
+                        return
+                    }
+                    root.stateContractError = ""
+                    root.protectionState = data
+                    root.initialStateReady = true
+                    if (completedKind === "instant")
+                        deferredFullRefreshTimer.restart()
+                    if (data.action_running === true) {
+                        if (!actionPollTimer.running) actionPollTimer.start()
+                    } else if (!root.actionPending) {
+                        actionPollTimer.stop()
+                    }
+                    const health = data.state_health || ({})
+                    if (health.refresh_ok === false) {
+                        root.toastError = true
+                        root.toastMessage = health.error || "Backup state refresh failed; showing last-known evidence"
+                        toastTimer.restart()
+                    }
                     root.finishPendingActionIfReady()
                 } catch (e) {
                     root.toastError = true
                     root.toastMessage = "Backup state could not be parsed"
                     toastTimer.restart()
+                    if (completedKind === "instant")
+                        deferredFullRefreshTimer.restart()
                 }
             }
         }
@@ -376,26 +650,124 @@ Item {
     }
 
     Timer {
-        id: pageTimer
-        interval: 70
+        id: modalOpenKickTimer
+        interval: 16
         repeat: false
         onTriggered: {
-            root.activePage = root.selectedPage
-            root.pageShift = 0
-            root.pageShown = true
+            if (GlobalStates.backupRecoveryOpen) {
+                root.kickLargeSurfaceDeformation()
+                root.modalShown = true
+            }
         }
     }
+
+    // phase4d-large-surface-deformation-v1
+    // Restrained production profile for large Prism modal surfaces.
+    ParallelAnimation {
+        id: largeSurfaceDeformAnimation
+
+        SequentialAnimation {
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceScaleX"
+                to: Appearance.surfaceDeformation.largeMiddleX
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeXCompressMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveFastSpatial
+            }
+
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceScaleX"
+                to: 1
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeXSettleMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveDefaultEffects
+            }
+        }
+
+        SequentialAnimation {
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceScaleY"
+                to: Appearance.surfaceDeformation.largeMiddleY
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeYCompressMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveFastSpatial
+            }
+
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceScaleY"
+                to: 1
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeYSettleMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveDefaultSpatial
+            }
+        }
+
+        SequentialAnimation {
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceRadiusScale"
+                to: Appearance.surfaceDeformation.largeRadiusMiddle
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeRadiusCompressMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveFastEffects
+            }
+
+            NumberAnimation {
+                target: root
+                property: "largeSurfaceRadiusScale"
+                to: 1
+                duration: Math.max(1, Math.round(Appearance.surfaceDeformation.largeRadiusSettleMs * Appearance.motionScale))
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve:
+                    Appearance.animationCurves.expressiveDefaultEffects
+            }
+        }
+    }
+
     Timer {
-        interval: 60000
+        interval: 1000
+        repeat: true
+        running: root.globallyBusy
+        triggeredOnStart: true
+        onTriggered: root.operationClock = Date.now() / 1000
+    }
+
+    Timer {
+        id: deferredFullRefreshTimer
+        interval: 120
+        repeat: false
+        onTriggered: {
+            if (!root.globallyBusy)
+                root.refresh(true, true)
+        }
+    }
+
+    Timer {
+        // Full Restic/SMART/Timeshift collection is intentionally not run every
+        // minute. The last verified state paints instantly; expensive domains
+        // refresh in the background every five minutes while the modal exists.
+        interval: 300000
         repeat: true
         running: true
-        onTriggered: root.refresh(true)
+        onTriggered: {
+            if (!root.globallyBusy)
+                root.refresh(true, true)
+        }
     }
     Timer {
         id: actionPollTimer
         interval: 2500
         repeat: true
-        onTriggered: root.refresh(false)
+        onTriggered: root.refresh(false, true)
     }
     Timer {
         id: toastTimer
@@ -404,30 +776,89 @@ Item {
         onTriggered: root.toastMessage = ""
     }
 
-    component HeaderButton: RippleButton {
+    component HeaderButton: Rectangle {
         id: button
         property string iconName: ""
         property string tooltipText: ""
         property bool active: false
-        implicitWidth: 40
-        implicitHeight: 40
+        signal clicked
+        implicitWidth: 34
+        implicitHeight: 34
+        radius: height / 2
         activeFocusOnTab: true
+
         Accessible.role: Accessible.Button
         Accessible.name: tooltipText
-        buttonRadius: Appearance.rounding.normal
-        buttonRadiusPressed: Appearance.rounding.normal
-        colBackground: active ? Appearance.colors.colLayer2Base : "transparent"
-        colBackgroundHover: Appearance.colors.colLayer2Hover
-        colRipple: Appearance.colors.colLayer2Active
-        contentItem: MaterialSymbol {
+        Accessible.focusable: true
+        Accessible.focused: button.activeFocus
+        Accessible.onPressAction: button.clicked()
+
+        Keys.onPressed: event => {
+            if (
+                event.key === Qt.Key_Space
+                || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter
+            ) {
+                button.clicked()
+                event.accepted = true
+            }
+        }
+
+        color:
+            Appearance.prismMode
+                ? (
+                    active || headerButtonArea.containsMouse || button.activeFocus
+                        ? Appearance.prism.persistentActiveFill
+                        : "transparent"
+                  )
+                : (
+                    active || headerButtonArea.containsMouse || button.activeFocus
+                        ? Appearance.colors.colPrimary
+                        : Qt.rgba(
+                            Appearance.colors.colOnSurfaceVariant.r,
+                            Appearance.colors.colOnSurfaceVariant.g,
+                            Appearance.colors.colOnSurfaceVariant.b,
+                            0.07
+                          )
+                  )
+
+        border.width: 1
+        border.color:
+            Appearance.prismMode
+                ? (active || button.activeFocus
+                    ? Appearance.prism.focusBorder
+                    : Appearance.prism.borderSubtle)
+                : (
+                    active || headerButtonArea.containsMouse || button.activeFocus
+                        ? Appearance.colors.colPrimary
+                        : Appearance.colors.colLayer0Border
+                  )
+
+        MaterialSymbol {
             anchors.centerIn: parent
             text: button.iconName
             iconSize: 19
             fill: button.active ? 1 : 0
-            color: button.active || button.hovered ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+            color:
+                Appearance.prismMode
+                    ? (active || headerButtonArea.containsMouse || button.activeFocus
+                        ? Appearance.colors.colPrimary
+                        : Appearance.colors.colOnSurfaceVariant)
+                    : (active || headerButtonArea.containsMouse || button.activeFocus
+                        ? Appearance.colors.colOnPrimary
+                        : Appearance.colors.colOnSurfaceVariant)
         }
+
+        MouseArea {
+            id: headerButtonArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: button.clicked()
+        }
+
         StyledToolTip {
-            extraVisibleCondition: parent !== null && parent.hovered === true
+            extraVisibleCondition: headerButtonArea.containsMouse
             delay: 450
             text: button.tooltipText
         }
@@ -440,7 +871,7 @@ Item {
         property bool compact: false
         implicitWidth: pillText.implicitWidth + (compact ? 14 : 20)
         implicitHeight: compact ? 24 : 28
-        radius: Appearance.rounding.full
+        radius: Appearance.radius.full
         color: state === "danger" ? Appearance.colors.colErrorContainer
              : state === "active" ? Appearance.colors.colSecondaryContainer
              : Appearance.colors.colLayer2Base
@@ -467,8 +898,8 @@ Item {
         activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: label
-        buttonRadius: Appearance.rounding.normal
-        buttonRadiusPressed: Appearance.rounding.normal
+        buttonRadius: Appearance.radius.control
+        buttonRadiusPressed: Appearance.radius.control
         colBackground: danger ? Appearance.colors.colErrorContainer
                      : emphasized ? Appearance.colors.colSecondaryContainer
                      : Appearance.colors.colLayer2Base
@@ -512,21 +943,32 @@ Item {
         activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: pageData.name
-        buttonRadius: Appearance.rounding.normal
-        buttonRadiusPressed: Appearance.rounding.normal
-        colBackground: selected ? Appearance.colors.colLayer2Base : "transparent"
-        colBackgroundHover: Appearance.colors.colLayer2Hover
-        colRipple: Appearance.colors.colLayer2Active
+        buttonRadius: Appearance.radius.control
+        buttonRadiusPressed: Appearance.radius.control
+        colBackground:
+            selected
+                ? (Appearance.prismMode
+                    ? Appearance.prism.persistentActiveFill
+                    : Appearance.colors.colLayer2Base)
+                : "transparent"
+        colBackgroundHover:
+            Appearance.prismMode
+                ? Appearance.prism.persistentHoverFill
+                : Appearance.colors.colLayer2Hover
+        colRipple:
+            Appearance.prismMode
+                ? Appearance.prism.persistentActiveFill
+                : Appearance.colors.colLayer2Active
         onClicked: root.switchPage(pageIndex)
         contentItem: RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 11
-            anchors.rightMargin: 11
-            spacing: 9
+            anchors.leftMargin: root.compactNavigation ? 8 : 11
+            anchors.rightMargin: root.compactNavigation ? 8 : 11
+            spacing: root.compactNavigation ? 5 : 9
             Rectangle {
                 Layout.preferredWidth: 3
                 Layout.preferredHeight: 22
-                radius: Appearance.rounding.full
+                radius: Appearance.radius.full
                 color: nav.selected ? Appearance.colors.colPrimary : "transparent"
             }
             MaterialSymbol {
@@ -536,6 +978,7 @@ Item {
                 color: nav.selected || nav.hovered ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
             }
             StyledText {
+                visible: !root.compactNavigation
                 Layout.fillWidth: true
                 text: nav.pageData.name
                 color: Appearance.colors.colOnLayer1
@@ -543,6 +986,11 @@ Item {
                 font.weight: nav.selected ? Font.DemiBold : Font.Normal
                 elide: Text.ElideRight
             }
+        }
+        StyledToolTip {
+            extraVisibleCondition: root.compactNavigation && nav.hovered
+            delay: 350
+            text: nav.pageData.name
         }
     }
 
@@ -620,10 +1068,16 @@ Item {
         property string state: "neutral"
         Layout.fillWidth: true
         implicitHeight: 82
-        radius: Appearance.rounding.normal
-        color: Appearance.colors.colLayer1Base
+        radius: Appearance.radius.card
+        color:
+            Appearance.prismMode
+                ? Appearance.prism.persistentFill
+                : Appearance.colors.colLayer1Base
         border.width: 1
-        border.color: Appearance.colors.colLayer0Border
+        border.color:
+            Appearance.prismMode
+                ? Appearance.prism.borderSubtle
+                : Appearance.colors.colLayer0Border
         RowLayout {
             anchors.fill: parent
             anchors.margins: 11
@@ -631,7 +1085,7 @@ Item {
             Rectangle {
                 Layout.preferredWidth: 36
                 Layout.preferredHeight: 36
-                radius: Appearance.rounding.normal
+                radius: Appearance.radius.control
                 color: metric.state === "danger" ? Appearance.colors.colErrorContainer
                      : metric.state === "active" ? Appearance.colors.colSecondaryContainer
                      : Appearance.colors.colLayer2Base
@@ -709,8 +1163,11 @@ Item {
         property string kind: "restic"
         Layout.fillWidth: true
         implicitHeight: 58
-        radius: Appearance.rounding.normal
-        color: Appearance.colors.colLayer2Base
+        radius: Appearance.radius.control
+        color:
+            Appearance.prismMode
+                ? Appearance.prism.persistentFill
+                : Appearance.colors.colLayer2Base
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: 11
@@ -757,8 +1214,11 @@ Item {
         property var check: ({})
         Layout.fillWidth: true
         implicitHeight: 58
-        radius: Appearance.rounding.normal
-        color: Appearance.colors.colLayer2Base
+        radius: Appearance.radius.control
+        color:
+            Appearance.prismMode
+                ? Appearance.prism.persistentFill
+                : Appearance.colors.colLayer2Base
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: 11
@@ -837,10 +1297,16 @@ Item {
         property string detail: ""
         Layout.fillWidth: true
         implicitHeight: 118
-        radius: Appearance.rounding.normal
-        color: Appearance.colors.colLayer1Base
+        radius: Appearance.radius.card
+        color:
+            Appearance.prismMode
+                ? Appearance.prism.persistentFill
+                : Appearance.colors.colLayer1Base
         border.width: 1
-        border.color: Appearance.colors.colLayer0Border
+        border.color:
+            Appearance.prismMode
+                ? Appearance.prism.borderSubtle
+                : Appearance.colors.colLayer0Border
         ColumnLayout {
             anchors.centerIn: parent
             width: Math.min(parent.width - 40, 520)
@@ -878,24 +1344,117 @@ Item {
         }
     }
 
+    // prism-v2-phase7: depth-4 spatial material lives beside the legacy modal
+    // so Fluid/Mica/Default keep their exact Rectangle/shadow path.
+    PrismSurface {
+        visible: Appearance.prismMode
+        x: modal.x
+        y: modal.y
+        width: modal.width
+        height: modal.height
+        depth: Appearance.prism.depthModal
+        surfaceRadius: Appearance.prism.radiusModal
+        elevated: true
+        opacity: modal.opacity
+        scale: modal.scale
+        transformOrigin: Item.Center
+        transform: Translate {
+            y: modalTranslate.y
+        }
+    }
+
     Rectangle {
         id: modal
+        // Phase 4: dialogs are truly modal. Keep the surface visible but remove
+        // all pointer/tab interaction while help/confirmation owns focus.
+        enabled: !root.overlayOpen
+        onXChanged: root.syncShellCaptureRegion()
+        onYChanged: root.syncShellCaptureRegion()
+        onWidthChanged: root.syncShellCaptureRegion()
+        onHeightChanged: root.syncShellCaptureRegion()
         anchors.centerIn: parent
         width: Math.min(1160, parent.width - 48)
         height: Math.min(740, parent.height - 48)
-        radius: Appearance.rounding.large
-        color: Appearance.colors.colLayer0Base
-        border.width: 1
-        border.color: Appearance.colors.colLayer0Border
+        radius:
+            Appearance.inlayMode
+                ? 0
+                : (Appearance.prismMode
+                    ? Appearance.prism.radiusModal
+                    : Appearance.radius.modal)
+                * root.largeSurfaceRadiusScale
+        color:
+            Appearance.prismMode
+                ? "transparent"
+                : Appearance.inlayMode
+                    ? Appearance.inlay.surfaceFill
+                    : Appearance.colors.colLayer0Base
+        border.width:
+            Appearance.prismMode
+                ? 0
+                : Appearance.inlayMode
+                    ? Appearance.inlay.borderWidth
+                    : 1
+        border.color:
+            Appearance.inlayMode
+                ? Appearance.inlay.borderControl
+                : Appearance.colors.colLayer0Border
         clip: true
-        opacity: 0
-        transform: Translate { id: modalTranslate; y: 10 }
-        Component.onCompleted: {
-            modal.opacity = 1
-            modalTranslate.y = 0
-        }
+        transformOrigin: Item.Center
+        opacity: root.modalShown ? 1 : 0
+        scale:
+            root.modalShown
+                ? 1
+                : Appearance.inlayMode
+                    ? 1
+                    : (Appearance.prismMode ? Appearance.prism.enterScale : 0.970)
+
+        transform: [
+            Translate {
+                id: modalTranslate
+                y:
+                    root.modalShown
+                        ? 0
+                        : Appearance.inlayMode
+                            ? Appearance.inlay.enterDistance
+                            : (Appearance.prismMode ? Appearance.prism.enterDistance * 2 : 34)
+
+                Behavior on y {
+                    MotionExpressiveAnim {
+                        phase:
+                            root.modalShown
+                                ? MotionExpressiveAnim.Enter
+                                : MotionExpressiveAnim.Exit
+                    }
+                }
+            },
+
+            // phase4d-large-surface-deformation-v1
+            Scale {
+                id: modalDeformationScale
+                origin.x: modal.width / 2
+                origin.y: modal.height / 2
+                xScale: root.largeSurfaceScaleX
+                yScale: root.largeSurfaceScaleY
+            }
+        ]
+
         Behavior on opacity {
-            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            MotionAnim {
+                type:
+                    root.modalShown
+                        ? MotionAnim.DefaultEffects
+                        : MotionAnim.FastEffects
+                duration: root.modalShown ? 200 : 180
+            }
+        }
+
+        Behavior on scale {
+            MotionExpressiveAnim {
+                phase:
+                    root.modalShown
+                        ? MotionExpressiveAnim.Enter
+                        : MotionExpressiveAnim.Exit
+            }
         }
 
         ColumnLayout {
@@ -912,7 +1471,7 @@ Item {
                 Rectangle {
                     Layout.preferredWidth: 42
                     Layout.preferredHeight: 42
-                    radius: Appearance.rounding.normal
+                    radius: Appearance.radius.card
                     color: Appearance.colors.colSecondaryContainer
                     MaterialSymbol {
                         anchors.centerIn: parent
@@ -936,7 +1495,7 @@ Item {
                     }
                     StyledText {
                         Layout.fillWidth: true
-                        text: `${root.protectionState.overall.summary || "System protection & disaster recovery"} · ${root.loading ? "Refreshing…" : root.updatedText(root.protectionState.generated_at)}`
+                        text: `${root.displayOverallSummary()} · ${root.loading ? "Loading…" : (root.backgroundRefreshing ? "Updating in background…" : root.updatedText(root.protectionState.generated_at))}${root.stateHealthText().length > 0 ? " · " + root.stateHealthText() : ""}`
                         color: Appearance.colors.colSubtext
                         font.pixelSize: Appearance.font.pixelSize.smallest
                         elide: Text.ElideRight
@@ -944,7 +1503,7 @@ Item {
                 }
 
                 Pill {
-                    label: root.protectionState.overall.label || "Checking"
+                    label: root.displayOverallLabel()
                     state: root.overallPillState()
                 }
 
@@ -952,7 +1511,10 @@ Item {
                     iconName: "help"
                     tooltipText: "Protection layers"
                     active: root.helpOpen
-                    onClicked: root.helpOpen = !root.helpOpen
+                    onClicked: {
+                        root.confirmOpen = false
+                        root.helpOpen = !root.helpOpen
+                    }
                 }
                 HeaderButton {
                     iconName: "refresh"
@@ -972,6 +1534,18 @@ Item {
                 color: Appearance.colors.colLayer0Border
             }
 
+            GlobalOperationBar {
+                Layout.fillWidth: true
+                Layout.leftMargin: 10
+                Layout.rightMargin: 10
+                Layout.topMargin: visible ? 8 : 0
+                visible: root.globallyBusy
+                actionName: root.actionLabel(root.currentOperationAction())
+                phaseText: root.currentOperation.phase || "Operation running"
+                metaText: root.operationMetaText()
+                percent: root.operationPercent()
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -979,9 +1553,9 @@ Item {
                 spacing: 10
 
                 Rectangle {
-                    Layout.preferredWidth: 174
+                    Layout.preferredWidth: root.compactNavigation ? 64 : 174
                     Layout.fillHeight: true
-                    radius: Appearance.rounding.large
+                    radius: Appearance.radius.sidebar
                     color: Appearance.colors.colLayer1Base
                     border.width: 1
                     border.color: Appearance.colors.colLayer0Border
@@ -1015,7 +1589,7 @@ Item {
                                 MaterialSymbol {
                                     text: root.protectionState.disk.mounted ? "hard_drive" : "hard_drive"
                                     iconSize: 15
-                                    color: root.protectionState.disk.mounted ? Appearance.colors.colPrimary : Appearance.colors.colSubtext
+                                    color: root.trustedMount() ? Appearance.colors.colPrimary : root.protectionState.disk.status === "wrong-filesystem-mounted" ? Appearance.colors.colError : Appearance.colors.colSubtext
                                 }
                                 StyledText {
                                     Layout.fillWidth: true
@@ -1042,17 +1616,64 @@ Item {
                     Layout.fillHeight: true
                     clip: true
                     Item {
+                        id: pageSurface
                         anchors.fill: parent
-                        opacity: root.pageShown ? 1 : 0
+                        opacity: 1
+
                         transform: Translate {
-                            x: root.pageShift
-                            Behavior on x {
-                                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                            id: pageTranslate
+                            x: 0
+                        }
+
+                        ParallelAnimation {
+                            id: pageOutAnimation
+
+                            MotionAnim {
+                                target: pageSurface
+                                property: "opacity"
+                                to: 0
+                                type: MotionAnim.FastEffects
+                                duration: 170
+                            }
+
+                            MotionAnim {
+                                target: pageTranslate
+                                property: "x"
+                                to: -42 * root.pageDirection
+                                type: MotionAnim.FastSpatial
+                                duration: 220
+                            }
+
+                            onFinished: {
+                                root.activePage = root.selectedPage
+                                pageTranslate.x = 42 * root.pageDirection
+                                pageSurface.opacity = 0
+                                pageInAnimation.restart()
                             }
                         }
-                        Behavior on opacity {
-                            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+
+                        ParallelAnimation {
+                            id: pageInAnimation
+
+                            MotionAnim {
+                                target: pageSurface
+                                property: "opacity"
+                                to: 1
+                                type: MotionAnim.DefaultEffects
+                                duration: 200
+                            }
+
+                            MotionAnim {
+                                target: pageTranslate
+                                property: "x"
+                                to: 0
+                                type: MotionAnim.DefaultSpatial
+                                duration: 420
+                            }
+
+                            onFinished: root.pageTransitioning = false
                         }
+
                         Loader {
                             anchors.fill: parent
                             sourceComponent: root.activePage === 0 ? overviewPage
@@ -1068,13 +1689,38 @@ Item {
     }
 
     Rectangle {
+        id: dialogScrim
+        visible: root.overlayOpen
+        anchors.fill: parent
+        z: 79
+        color: Qt.rgba(0, 0, 0, 0.36)
+        Accessible.ignored: true
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            hoverEnabled: true
+            onWheel: wheel => wheel.accepted = true
+        }
+    }
+
+    Rectangle {
+        id: helpDialog
         visible: root.helpOpen
         anchors.centerIn: modal
         width: Math.min(520, modal.width - 80)
         implicitHeight: helpColumn.implicitHeight + 36
         z: 80
-        radius: Appearance.rounding.large
+        radius: Appearance.radius.modal
         color: Appearance.colors.colLayer1Base
+        focus: visible
+        Accessible.role: Accessible.Dialog
+        Accessible.name: "Protection layers"
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Escape) {
+                root.helpOpen = false
+                event.accepted = true
+            }
+        }
         border.width: 1
         border.color: Appearance.colors.colLayer0Border
         ColumnLayout {
@@ -1093,6 +1739,7 @@ Item {
                     font.weight: Font.DemiBold
                 }
                 HeaderButton {
+                    id: helpCloseButton
                     iconName: "close"
                     tooltipText: "Close"
                     onClicked: root.helpOpen = false
@@ -1108,7 +1755,7 @@ Item {
             Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: helpRows.implicitHeight + 20
-                radius: Appearance.rounding.normal
+                radius: Appearance.radius.card
                 color: Appearance.colors.colLayer2Base
                 ColumnLayout {
                     id: helpRows
@@ -1126,13 +1773,23 @@ Item {
     }
 
     Rectangle {
+        id: confirmDialog
         visible: root.confirmOpen
         anchors.centerIn: modal
         width: Math.min(480, modal.width - 80)
         implicitHeight: confirmColumn.implicitHeight + 36
         z: 90
-        radius: Appearance.rounding.large
+        radius: Appearance.radius.modal
         color: Appearance.colors.colLayer1Base
+        focus: visible
+        Accessible.role: Accessible.Dialog
+        Accessible.name: root.confirmTitle || "Confirm action"
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Escape) {
+                root.confirmOpen = false
+                event.accepted = true
+            }
+        }
         border.width: 1
         border.color: Appearance.colors.colLayer0Border
         ColumnLayout {
@@ -1159,6 +1816,7 @@ Item {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 SmallButton {
+                    id: confirmCancelButton
                     iconName: "close"
                     label: "Cancel"
                     onClicked: root.confirmOpen = false
@@ -1185,7 +1843,7 @@ Item {
         width: Math.min(520, modal.width - 60)
         implicitHeight: 44
         z: 100
-        radius: Appearance.rounding.normal
+        radius: Appearance.radius.control
         color: root.toastError ? Appearance.colors.colErrorContainer : Appearance.colors.colLayer1Base
         border.width: 1
         border.color: root.toastError ? Appearance.colors.colError : Appearance.colors.colLayer0Border
@@ -1254,10 +1912,10 @@ Item {
                         }
                         Metric {
                             iconName: "hard_drive"
-                            value: root.protectionState.disk.mounted ? "Mounted" : root.protectionState.disk.connected ? "Connected" : "Offline"
+                            value: root.trustedMount() ? "Mounted" : root.protectionState.disk.status === "wrong-filesystem-mounted" ? "Blocked" : root.protectionState.disk.mounted ? "Unverified" : root.protectionState.disk.connected ? "Connected" : "Offline"
                             label: "Backup HDD"
                             subtitle: root.diskSubtitle()
-                            state: root.protectionState.disk.mounted ? "active" : "neutral"
+                            state: root.protectionState.disk.status === "wrong-filesystem-mounted" ? "danger" : root.trustedMount() ? "active" : "neutral"
                         }
                         Metric {
                             iconName: "verified_user"
@@ -1277,68 +1935,38 @@ Item {
                             iconName: "drive_file_move"
                             label: "Mount HDD"
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("mount")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "backup"
-                            label: "Back up now"
+                            label: root.actionButtonLabel("backup", "Back up now")
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("backup")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "restore"
                             label: "Restore point"
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("timeshift")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "verified"
-                            label: "Check repository"
-                            enabled: !root.actionPending
+                            label: "Check repository + data"
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("restic-check")
                         }
                         Item { Layout.fillWidth: true }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "eject"
                             label: "Safely unmount"
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.confirm("eject", "Safely unmount backup HDD", "Running backup, restore-test, manifest, or repository-check operations must be finished first. The filesystem will be synced and unmounted; after success it is safe to disconnect the drive.")
-                        }
-                    }
-
-                    Rectangle {
-                        visible: root.actionPending || root.protectionState.action_running
-                        Layout.fillWidth: true
-                        implicitHeight: 58
-                        radius: Appearance.rounding.normal
-                        color: Appearance.colors.colSecondaryContainer
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 9
-                            MaterialSymbol { text: "progress_activity"; iconSize: 19; color: Appearance.colors.colOnSecondaryContainer }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 1
-                                StyledText {
-                                    text: `${root.actionLabel(root.protectionState.current_action || root.lastRequestedAction)} in progress…`
-                                    color: Appearance.colors.colOnSecondaryContainer
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                    font.weight: Font.DemiBold
-                                }
-                                StyledText {
-                                    text: "The systemd job continues safely if you change pages or close this window."
-                                    color: Appearance.colors.colOnSecondaryContainer
-                                    font.pixelSize: Appearance.font.pixelSize.smallest
-                                }
-                            }
                         }
                     }
 
@@ -1352,7 +1980,7 @@ Item {
                         visible: root.protectionState.attention.length > 0
                         Layout.fillWidth: true
                         implicitHeight: attentionColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1367,7 +1995,7 @@ Item {
                                     required property var modelData
                                     Layout.fillWidth: true
                                     implicitHeight: 56
-                                    radius: Appearance.rounding.normal
+                                    radius: Appearance.radius.control
                                     color: modelData.severity === "critical" ? Appearance.colors.colErrorContainer : Appearance.colors.colLayer2Base
                                     RowLayout {
                                         anchors.fill: parent
@@ -1415,7 +2043,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: readinessColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1436,7 +2064,7 @@ Item {
                         visible: root.protectionState.activity.length > 0
                         Layout.fillWidth: true
                         implicitHeight: activityColumn.implicitHeight + 16
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1513,18 +2141,18 @@ Item {
                         Layout.fillWidth: true
                         spacing: 6
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "backup"
-                            label: "Back up now"
+                            label: root.actionButtonLabel("backup", "Back up now")
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("backup")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "verified"
-                            label: "Check repository"
-                            enabled: !root.actionPending
+                            label: "Check repository + data"
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("restic-check")
                         }
                         SmallButton {
@@ -1532,14 +2160,14 @@ Item {
                             iconName: "drive_file_move"
                             label: "Mount HDD"
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("mount")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "eject"
                             label: "Safely unmount"
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.confirm("eject", "Safely unmount backup HDD", "The filesystem will be synced and unmounted. Active backup or verification jobs will block this action.")
                         }
                         Item { Layout.fillWidth: true }
@@ -1556,7 +2184,7 @@ Item {
                         visible: root.protectionState.restic.snapshots.length > 0
                         Layout.fillWidth: true
                         implicitHeight: backupSnapshotsColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1586,7 +2214,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: storageRows.implicitHeight + 22
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1596,9 +2224,9 @@ Item {
                             anchors.margins: 11
                             spacing: 7
                             InfoRow { label: "Physical disk"; value: root.protectionState.disk.connected ? "Connected" : "Offline" }
-                            InfoRow { label: "Filesystem"; value: root.protectionState.disk.mounted ? (root.protectionState.disk.filesystem_accessible ? "Mounted · accessible" : "Mounted · unavailable") : "Not mounted" }
+                            InfoRow { label: "Filesystem"; value: root.trustedMount() ? "Mounted · identity verified" : root.protectionState.disk.status === "wrong-filesystem-mounted" ? "Blocked · wrong filesystem" : root.protectionState.disk.mounted ? "Mounted · unverified" : "Not mounted" }
                             InfoRow { label: "Repository data"; value: root.domainFreshness(root.protectionState.restic) }
-                            InfoRow { label: "Free space"; value: root.protectionState.disk.mounted ? root.bytesText(root.protectionState.disk.free_bytes) : "—" }
+                            InfoRow { label: "Free space"; value: root.trustedMount() ? root.bytesText(root.protectionState.disk.free_bytes) : "—" }
                         }
                     }
 
@@ -1606,7 +2234,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: retentionRows.implicitHeight + 22
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1615,11 +2243,9 @@ Item {
                             anchors.fill: parent
                             anchors.margins: 11
                             spacing: 7
-                            InfoRow { label: "Daily"; value: "Keep 7" }
-                            InfoRow { label: "Weekly"; value: "Keep 4" }
-                            InfoRow { label: "Monthly"; value: "Keep 6" }
-                            InfoRow { label: "Baseline"; value: "Preserved by tag" }
-                            InfoRow { label: "Maintenance"; value: root.protectionState.restic.maintenance_timer.ActiveState === "active" ? "Weekly timer enabled" : "Timer needs review" }
+                            InfoRow { label: "Policy"; value: "Managed by external Restic maintenance" }
+                            InfoRow { label: "Retention counts"; value: "Not imported · not claimed by this UI" }
+                            InfoRow { label: "Maintenance"; value: root.protectionState.restic.maintenance_timer.ActiveState === "active" ? "Timer active" : "Timer needs review" }
                         }
                     }
                     Item { Layout.preferredHeight: 6 }
@@ -1679,11 +2305,11 @@ Item {
                         Layout.fillWidth: true
                         spacing: 6
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "add_circle"
                             label: "Create restore point"
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("timeshift")
                         }
                         SmallButton {
@@ -1691,11 +2317,11 @@ Item {
                             iconName: "drive_file_move"
                             label: "Mount HDD"
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("mount")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "menu_book"
                             label: "Recovery guide"
                             onClicked: root.openRestoreGuide()
@@ -1714,7 +2340,7 @@ Item {
                         visible: root.protectionState.timeshift.snapshots.length > 0
                         Layout.fillWidth: true
                         implicitHeight: restoreSnapshotsColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1743,7 +2369,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: 76
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1790,7 +2416,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: dotfilesRows.implicitHeight + 24
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1830,7 +2456,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: etcRows.implicitHeight + 24
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1869,7 +2495,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: 76
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1919,12 +2545,14 @@ Item {
                             iconName: "health_and_safety"
                             value: !root.protectionState.smart.known ? "Unavailable"
                                 : root.protectionState.smart.condition === "critical" ? "Problem"
-                                : root.protectionState.smart.condition === "history-warning" ? "Current OK" : "Healthy"
+                                : root.protectionState.smart.condition === "history-warning" ? "Current OK"
+                                : root.protectionState.smart.condition === "unverified" ? "Unverified" : "Healthy"
                             label: "SMART condition"
                             subtitle: !root.protectionState.smart.known ? "No verified SMART evidence"
                                 : root.protectionState.smart.availability === "cached" ? `Last verified ${root.ageText(root.protectionState.smart.verified_at)}`
-                                : root.protectionState.smart.condition === "history-warning" ? "Historical errors recorded · current counters clean" : "Live attribute check"
-                            state: root.protectionState.smart.condition === "critical" ? "danger" : root.protectionState.smart.known ? "active" : "neutral"
+                                : root.protectionState.smart.condition === "history-warning" ? "Historical errors recorded · current counters clean"
+                                : root.protectionState.smart.condition === "unverified" ? "Overall SMART health could not be verified" : "Live attribute check"
+                            state: root.protectionState.smart.condition === "critical" ? "danger" : root.protectionState.smart.condition === "healthy" || root.protectionState.smart.condition === "history-warning" ? "active" : "neutral"
                         }
                         Metric {
                             iconName: "device_thermostat"
@@ -1947,7 +2575,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: smartRows.implicitHeight + 22
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -1968,7 +2596,7 @@ Item {
                         visible: Number(root.protectionState.smart.historical_error_count || 0) > 0
                         Layout.fillWidth: true
                         implicitHeight: 70
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -2002,7 +2630,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: testRows.implicitHeight + 22
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -2020,14 +2648,14 @@ Item {
                                     visible: root.protectionState.disk.connected
                                     iconName: "bolt"
                                     label: root.smartDuration("short")
-                                    enabled: !root.actionPending
+                                    enabled: !root.globallyBusy
                                     onClicked: root.requestAction("smart-short")
                                 }
                                 SmallButton {
                                     visible: root.protectionState.disk.connected
                                     iconName: "science"
                                     label: root.smartDuration("long")
-                                    enabled: !root.actionPending
+                                    enabled: !root.globallyBusy
                                     onClicked: {
                                         const mins = root.protectionState.smart.test_durations.extended_minutes || 188
                                         root.confirm("smart-long", "Start extended SMART test", `The drive reports an estimated ${mins} minutes. Keep the HDD connected while the self-test is running. This does not mount or modify the filesystem.`)
@@ -2066,7 +2694,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: recoveryChecksColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -2086,7 +2714,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: resilienceColumn.implicitHeight + 18
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -2107,18 +2735,18 @@ Item {
                         Layout.fillWidth: true
                         spacing: 6
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "verified"
                             label: "Verify restore"
                             emphasized: root.protectionState.restic.restore_test && root.protectionState.restic.restore_test.ok !== true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("restore-test")
                         }
                         SmallButton {
-                            visible: root.protectionState.disk.mounted
+                            visible: root.trustedMount()
                             iconName: "sync"
                             label: "Refresh manifests"
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("refresh-manifests")
                         }
                         SmallButton {
@@ -2126,7 +2754,7 @@ Item {
                             iconName: "drive_file_move"
                             label: "Mount HDD"
                             emphasized: true
-                            enabled: !root.actionPending
+                            enabled: !root.globallyBusy
                             onClicked: root.requestAction("mount")
                         }
                         Item { Layout.fillWidth: true }
@@ -2136,7 +2764,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: recoveryInfoColumn.implicitHeight + 24
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border
@@ -2146,16 +2774,70 @@ Item {
                             anchors.margins: 12
                             spacing: 8
                             InfoRow { label: "Guide"; value: root.protectionState.recovery.restore_doc_known ? "RESTORE.md verified" : "Not currently verified" }
-                            InfoRow { label: "Guide path"; value: root.protectionState.recovery.restore_doc || "Not available" }
-                            InfoRow { label: "Manifests"; value: root.protectionState.recovery.manifests_known ? "Available" : "Not currently verified" }
+                            InfoRow { label: "Guide path"; value: root.protectionState.recovery.restore_doc || "/mnt/backup/recovery/RESTORE.md" }
+                            InfoRow { label: "Manifests"; value: root.protectionState.recovery.manifests_fresh ? "Current" : root.protectionState.recovery.manifests_known ? "Stale" : "Not currently verified" }
                             InfoRow { label: "Manifest freshness"; value: root.protectionState.recovery.manifests_updated_at ? root.ageText(root.protectionState.recovery.manifests_updated_at) : "Unknown" }
                             InfoRow { label: "Stored Arch ISO"; value: (root.protectionState.recovery.iso_files || []).length > 0 ? `${root.protectionState.recovery.iso_files.length} file(s)` : "None known" }
-                            InfoRow { label: "Backup UUID"; value: root.protectionState.disk.uuid || "Not configured" }
+                            InfoRow {
+                                label: "Repository identity"
+                                value: root.protectionState.restic.repository_id
+                                    ? String(root.protectionState.restic.repository_id).slice(0, 12) + "…"
+                                    : "Not currently verified"
+                            }
+                            InfoRow {
+                                label: "Snapshot scope"
+                                value: root.protectionState.restic.scope && root.protectionState.restic.scope.hostname
+                                    ? `Host · ${root.protectionState.restic.scope.hostname}`
+                                    : "Not currently verified"
+                            }
+                            InfoRow {
+                                label: "Latest backup proof"
+                                value: root.protectionState.restic.backup_proof && root.protectionState.restic.backup_proof.current
+                                    ? `Verified · ${String(root.protectionState.restic.backup_proof.snapshot_id || "").slice(0, 8)}`
+                                    : "Not linked to current snapshot"
+                            }
+                            InfoRow {
+                                label: "Recovery credential"
+                                value: root.protectionState.recovery.credential_evidence && root.protectionState.recovery.credential_evidence.fresh
+                                    ? `Verified · ${root.protectionState.recovery.credential_evidence.label || "external"}`
+                                    : "Not currently verified"
+                            }
+                            InfoRow { label: "Backup UUID"; value: root.protectionState.disk.uuid || "Unknown" }
+                            InfoRow {
+                                label: "Deployment"
+                                value: root.protectionState.deployment && root.protectionState.deployment.version
+                                    ? `${root.protectionState.deployment.version} · ${root.protectionState.backend_revision || "backend"}`
+                                    : (root.protectionState.backend_revision || "Unknown")
+                            }
+                            InfoRow {
+                                label: "Installed"
+                                value: root.protectionState.deployment && root.protectionState.deployment.installed_at
+                                    ? root.updatedText(root.protectionState.deployment.installed_at)
+                                    : "Metadata unavailable"
+                            }
+                            InfoRow {
+                                label: "Local closure"
+                                value: root.protectionState.deployment && root.protectionState.deployment.local_closure
+                                    ? `${root.protectionState.deployment.phase || "Phase 4B"} · passed`
+                                    : "Not verified"
+                            }
+                            InfoRow {
+                                label: "Source revision"
+                                value: root.protectionState.deployment && root.protectionState.deployment.source_repo_detected
+                                    ? `${root.protectionState.deployment.source_commit ? String(root.protectionState.deployment.source_commit).slice(0, 8) : "Git"}${root.protectionState.deployment.source_dirty ? " · dirty" : ""}${root.protectionState.deployment.source_verified ? " · verified" : " · not linked"}`
+                                    : "Local source repo not detected"
+                            }
+                            InfoRow {
+                                label: "Source CI"
+                                value: root.protectionState.deployment && root.protectionState.deployment.ci_verified
+                                    ? "Verified"
+                                    : "Not verified by local deployment"
+                            }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 SmallButton {
-                                    visible: root.protectionState.disk.mounted && root.protectionState.recovery.restore_doc_known
+                                    visible: root.trustedMount() && root.protectionState.recovery.restore_doc_known
                                     iconName: "menu_book"
                                     label: "Open RESTORE.md"
                                     onClicked: root.openRestoreGuide()
@@ -2169,7 +2851,7 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: strategyColumn.implicitHeight + 24
-                        radius: Appearance.rounding.normal
+                        radius: Appearance.radius.card
                         color: Appearance.colors.colLayer1Base
                         border.width: 1
                         border.color: Appearance.colors.colLayer0Border

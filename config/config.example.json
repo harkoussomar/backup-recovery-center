@@ -10,7 +10,20 @@
   "maintenance_service": "restic-maintenance.service",
   "maintenance_timer": "restic-maintenance.timer",
   "overdue_hours": 48,
-  "second_copy_configured": false,
-  "recovery_media_verified": false,
-  "restore_test_path": "/etc/hostname"
+  "timeshift_overdue_hours": 168,
+  "repository_check_overdue_hours": 720,
+  "restore_test_overdue_hours": 720,
+  "manifests_overdue_hours": 168,
+  "restic_expected_hostname": "",
+  "restic_required_tags": [],
+  "restic_required_paths": [],
+  "restic_data_check_subsets": 4,
+  "restic_allow_unchanged_backup": false,
+  "restore_test_path": "/etc/hostname",
+  "credential_proof_overdue_hours": 4320,
+  "recovery_media_proof_overdue_hours": 2160,
+  "second_copy_proof_overdue_hours": 720,
+  "notifications": {
+    "enabled": true
+  }
 }
