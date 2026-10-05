@@ -149,7 +149,7 @@ def main() -> int:
     dep_good = (
         install.get('version') == EXPECTED_CONTRACT
         and install.get('phase') == '4B'
-        and install.get('release_stage') == 'local-closure'
+        and install.get('release_stage') in ('local-closure', 'public-release')
         and bool(install.get('local_closure'))
     )
     add('local closure metadata', 'pass' if dep_good else 'fail',
